@@ -1,10 +1,10 @@
 # Casting Mold Maker
 
-Turn a watertight STL, OBJ, or 3MF solid into two matching mold halves. The app saves two binary STL files in a new subfolder, ready to import into a slicer. Both files contain only the mold geometry. Their mating faces share the same plane and coordinates.
+Turn a watertight STL, OBJ, or 3MF solid into two matching mold halves or a single open-face mold. The app saves the mold as binary STL files in a new subfolder, ready to import into a slicer. When you export two halves, their mating faces share the same plane and coordinates.
 
 ## Run on Windows
 
-Double-click **Casting Mold Maker 7.exe** in the `dist` folder or run **Open Mold Maker.cmd**. The bundled app runs on 64-bit Windows and includes Python and its dependencies. It draws at the Windows system DPI. Moving the window to a monitor with a different scaling factor can cause Windows to stretch it.
+Double-click **Casting Mold Maker 8.exe** in the `dist` folder or run **Open Mold Maker.cmd**. The bundled app runs on 64-bit Windows and includes Python and its dependencies. It draws at the Windows system DPI. Moving the window to a monitor with a different scaling factor can cause Windows to stretch it.
 
 ## Make a mold
 
@@ -37,13 +37,12 @@ A successful repair is used by all mold tabs. **Save repaired STL…** writes a 
 
 For highly detailed meshes, silicone mode asks for a simplified source if it cannot keep a thin gap around the contours.
 
-## Make a jacket for brush-on silicone
+## Brush-cast small parts in an open mold
 
-1. Open **Brush-On** and load the positive master with the intended opening facing down along −Z. **Open base height (%)** sets the bottom edge of the jacket and coat preview. At 0% it sits at the lowest point on the master. Raising it leaves the lower portion outside the jacket, so use that setting when that portion can be left uncovered or supported separately.
-2. Set **Silicone coat (mm)** to the planned cured thickness and **Jacket clearance (mm)** to the extra space for fit. The preview uses a rounded offset, and the status reports the estimated volume of the coat. The quantity you mix also needs to account for application losses and variations in coat thickness.
-3. Set the jacket wall thickness, choose an X or Y split, and set **Clamp flange (mm)** for a lip along the seam. Enter 0 to omit the flange. Optional alignment keys register the two printed halves. If the app cannot build two connected halves, try a different split or reduce the flange width.
-4. Check the **Silicone coat cutaway**, then select **Save jacket STLs…** to export the two `jacket_` files. The removal check samples short, straight pulls of the jacket halves. Check deep undercuts and curved or rounded bases by dry-fitting before casting.
-5. Brush the silicone onto the original master following the silicone supplier’s instructions. After curing, dry-fit the printed halves around the coat and check that they close without squeezing it or leaving large unsupported gaps. Open the jacket to remove the master. Prepare an opening in the silicone for casting, then reassemble and clamp the supported mold.
+1. Open **Open-Face** and choose a model. Set the **Opening direction** to the side you want exposed for brushing. For a relief with a flat back, point the opening toward the back.
+2. Set **Opening plane (%)** to choose where the cavity ends. The percentage runs from the deepest point toward the opening. Moving the plane deeper can expose a wider opening and leaves the model above that plane out of the casting. At 100% a flat-backed piece can retain its full depth at its original scale.
+3. Set **Wall and base (mm)** and inspect the **Open mold** preview. If you see an undercut warning, try a different opening plane or direction. A rigid casting can catch under the lip or along the cavity walls.
+4. Click **Save open mold STL…** to export a single mold STL, with its flat base at Z = 0 and its cavity facing up. Brush a coating of your casting material onto the exposed cavity surface to make an open-backed piece. The coats determine the thickness of the casting.
 
 ## Build from source and verify the export
 
@@ -53,5 +52,5 @@ From the project folder on 64-bit Windows with Python 3.14 installed, run:
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt pyinstaller==6.22.3
 .\.venv\Scripts\python.exe test_mold.py
-.\.venv\Scripts\python.exe -m PyInstaller --noconfirm --onefile --windowed --name "Casting Mold Maker 7" --manifest (Resolve-Path windows.manifest).Path --specpath build --collect-data trimesh mold_maker.py
+.\.venv\Scripts\python.exe -m PyInstaller --noconfirm --onefile --windowed --name "Casting Mold Maker 8" --manifest (Resolve-Path windows.manifest).Path --specpath build --collect-data trimesh mold_maker.py
 ```
