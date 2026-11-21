@@ -4,7 +4,7 @@ Turn a watertight STL, OBJ, or 3MF solid into two matching mold halves or a sing
 
 ## Run on Windows
 
-Double-click **Casting Mold Maker 8.exe** in the `dist` folder or run **Open Mold Maker.cmd**. The bundled app runs on 64-bit Windows and includes Python and its dependencies. It draws at the Windows system DPI. Moving the window to a monitor with a different scaling factor can cause Windows to stretch it.
+Double-click **Casting Mold Maker 9.exe** in the `dist` folder or run **Open Mold Maker.cmd**. The bundled app runs on 64-bit Windows and includes Python and its dependencies. It draws at the Windows system DPI. Moving the window to a monitor with a different scaling factor can cause Windows to stretch it.
 
 ## Make a mold
 
@@ -41,8 +41,8 @@ For highly detailed meshes, silicone mode asks for a simplified source if it can
 
 1. Open **Open-Face** and choose a model. Set the **Opening direction** to the side you want exposed for brushing. For a relief with a flat back, point the opening toward the back.
 2. Set **Opening plane (%)** to choose where the cavity ends. The percentage runs from the deepest point toward the opening. Moving the plane deeper can expose a wider opening and leaves the model above that plane out of the casting. At 100% a flat-backed piece can retain its full depth at its original scale.
-3. Set **Wall and base (mm)** and inspect the **Open mold** preview. If you see an undercut warning, try a different opening plane or direction. A rigid casting can catch under the lip or along the cavity walls.
-4. Click **Save open mold STL…** to export a single mold STL, with its flat base at Z = 0 and its cavity facing up. Brush a coating of your casting material onto the exposed cavity surface to make an open-backed piece. The coats determine the thickness of the casting.
+3. Set **Shell thickness (mm)** and inspect the **Open mold** preview. The back follows the model’s contour. If any part of the casting surface is hidden by an overhang, lower the opening plane or change direction to expose it.
+4. Click **Save open mold STL…** to export a single contoured shell, with its lowest point at Z = 0 and its casting surface facing up. Brush resin or silicone onto that surface to make an open-backed piece. The coats determine the thickness of the casting.
 
 ## Build from source and verify the export
 
@@ -52,5 +52,5 @@ From the project folder on 64-bit Windows with Python 3.14 installed, run:
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt pyinstaller==6.22.3
 .\.venv\Scripts\python.exe test_mold.py
-.\.venv\Scripts\python.exe -m PyInstaller --noconfirm --onefile --windowed --name "Casting Mold Maker 8" --manifest (Resolve-Path windows.manifest).Path --specpath build --collect-data trimesh mold_maker.py
+.\.venv\Scripts\python.exe -m PyInstaller --noconfirm --onefile --windowed --name "Casting Mold Maker 9" --manifest (Resolve-Path windows.manifest).Path --specpath build --collect-data trimesh mold_maker.py
 ```

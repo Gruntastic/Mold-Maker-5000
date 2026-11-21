@@ -110,14 +110,13 @@ def check_export():
             else:
                 raise AssertionError("Invalid port placements should be rejected.")
 
-        # At 100% a flat-backed model keeps its full depth. The top of the
-        # cavity is completely exposed and a full-thickness base remains.
+        # At 100% a flat-backed model keeps its full depth and open top.
         info = box_path.stat()
         source_key = box_path, info.st_size, info.st_mtime_ns
         settings = (3, "+Z", 100)
         mold, note = build_open_face(model, *settings)
         np.testing.assert_allclose(mold.bounding_box(), [-13, -18, 0, 13, 18, 43])
-        assert "Cavity depth: 40 mm" in note and "Undercuts" not in note
+        assert "Cavity depth: 40 mm" in note
         brush_path = Manifold.cube((18, 28, 41)).translate((-9, -14, 3.5))
         assert (mold ^ brush_path).is_empty()
         assert np.isclose(mold.slice(1).area(), 26 * 36)
@@ -130,17 +129,23 @@ def check_export():
         assert trimesh.load_mesh(result / "open_face_mold.stl").is_volume
 
         for direction in OPEN_DIRECTIONS:
-            mold, note = build_open_face(round_model, 2, direction, 50)
-            assert stl_bytes(mold) and "Undercuts" not in note
+            mold, _ = build_open_face(round_model, 2, direction, 35)
+            assert stl_bytes(mold)
+            min_x, min_y, min_z, max_x, max_y, max_z = mold.bounding_box()
+            rim_area = (max_x - min_x) * (max_y - min_y)
+            # The curved back narrows toward the bottom. A box with a
+            # carved recess would fill the entire first layer.
+            assert mold.slice(min_z + 0.25).area() < rim_area / 3
+            assert (mold ^ Manifold.cylinder(max_z, 0.5).translate((0, 0, 2.25))).is_empty()
         tapered = Manifold.cylinder(10, 3, 5, circular_segments=16)
-        assert "Undercuts" not in build_open_face(tapered, 2, "+Z", 100)[1]
-        assert "Undercuts" in build_open_face(tapered, 2, "-Z", 100)[1]
-        try:
-            build_open_face(round_model, 2, "+Z", 100)
-        except ValueError as error:
-            assert "no open face" in str(error)
-        else:
-            raise AssertionError("A closed round tip should not be exported as an open face.")
+        assert stl_bytes(build_open_face(tapered, 2, "+Z", 100)[0])
+        for fixture, direction, expected in ((tapered, "-Z", "overhangs"), (round_model, "+Z", "no open face")):
+            try:
+                build_open_face(fixture, 2, direction, 100)
+            except ValueError as error:
+                assert expected in str(error)
+            else:
+                raise AssertionError("Hidden or closed surfaces should not be exported as open molds.")
 
         torus = path / "dense-torus.stl"
         trimesh.creation.torus(20, 7, major_sections=96, minor_sections=64).export(torus)

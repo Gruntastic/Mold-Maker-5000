@@ -131,7 +131,7 @@ def offset_in_sections(model, padding, budget):
     return None
 
 
-def mold_exterior(model, wall, thin_gap=False):
+def mold_exterior(model, wall, thin_gap=False, *, require_contour=False):
     budget = 2 * EXTERIOR_FACE_BUDGET if thin_gap else EXTERIOR_FACE_BUDGET
     if model.num_tri() <= budget:
         return model.minkowski_sum(Manifold.cube((2 * wall,) * 3, center=True)), ""
@@ -155,6 +155,8 @@ def mold_exterior(model, wall, thin_gap=False):
 
     if thin_gap:
         raise ValueError("This model is too detailed to keep a thin silicone gap. Reduce the mesh triangle count and try again.")
+    if require_contour:
+        raise ValueError("This model is too detailed for a contoured shell. Reduce the mesh triangle count and try again.")
 
     # For dense geometry that cannot be reduced within the tolerance, the
     # convex envelope of the eight translated hulls avoids a large boolean union.
@@ -296,7 +298,7 @@ def validate_open_face(wall, direction, opening_percent):
 def build_open_face(model, wall, direction, opening_percent):
     validate_open_face(wall, direction, opening_percent)
 
-    # Orient the exported part with a flat underside and the opening facing +Z.
+    # Orient the exposed casting surface toward +Z.
     upright = model.rotate(OPEN_DIRECTIONS[direction])
     low_z, high_z = upright.bounding_box()[2::3]
     opening = low_z + (high_z - low_z) * opening_percent / 100 if opening_percent < 100 else high_z
@@ -305,31 +307,28 @@ def build_open_face(model, wall, direction, opening_percent):
     if cavity.status() != Error.NoError or cavity.volume() <= 0:
         raise ValueError(no_opening)
 
-    undercut = False
     for pocket in cavity.decompose():
         mesh = pocket.to_mesh64()
         triangles = mesh.vert_properties[mesh.tri_verts, :3]
         edge_a = triangles[:, 1, :2] - triangles[:, 0, :2]
         edge_b = triangles[:, 2, :2] - triangles[:, 0, :2]
-        # Upward-facing cavity faces below the lip can catch a rigid casting.
+        # Upward-facing model faces below the cut become downward-facing
+        # mold surfaces. A straight approach from above cannot reach them.
         facing_up = edge_a[:, 0] * edge_b[:, 1] > edge_a[:, 1] * edge_b[:, 0]
         at_lip = np.all(np.isclose(triangles[:, :, 2], opening, rtol=0, atol=pocket.get_tolerance()), axis=1)
         if not np.any(facing_up & at_lip):
             raise ValueError(no_opening)
-        undercut |= bool(np.any(facing_up & ~at_lip))
+        if np.any(facing_up & ~at_lip):
+            raise ValueError("This opening leaves overhangs over the casting surface. Lower the opening plane or change direction.")
 
-    left, front, bottom, right, back, _ = cavity.bounding_box()
-    blank = Manifold.cube((right - left + 2 * wall, back - front + 2 * wall, opening - bottom + wall))
-    blank = blank.translate((left - wall, front - wall, bottom - wall))
-    # Subtract the untrimmed model once so the lip is formed by the blank's
-    # top plane without a second boolean along the same cut.
-    mold = (blank - upright).translate((0, 0, wall - bottom))
+    # Offset only the selected contour, then remove everything above the
+    # opening plane. Subtract the original surface to retain its detail.
+    outer, exterior_note = mold_exterior(cavity, wall, require_contour=True)
+    mold = outer.trim_by_plane((0, 0, -1), -opening) - upright
     if mold.status() != Error.NoError or mold.volume() <= 0 or len(mold.decompose()) != 1:
-        raise ValueError("The settings did not produce a solid open-face mold. Try changing the wall or opening plane.")
-    note = f"Cavity depth: {opening - bottom:.3g} mm"
-    if undercut:
-        note += "\nUndercuts may trap a rigid casting. Check release before casting."
-    return mold, note
+        raise ValueError("The settings did not produce one open shell. Try changing the thickness or opening plane.")
+    note = "\n".join(filter(None, (f"Cavity depth: {opening - low_z:.3g} mm", exterior_note)))
+    return mold.translate((0, 0, -mold.bounding_box()[2])), note
 
 
 def stl_bytes(half):
@@ -864,11 +863,11 @@ def launch():
         notebook.add(page, text=name)
         page.columnconfigure(1, weight=1)
         if name == "Open-Face":
-            wall = tk.StringVar(value="3")
+            wall = tk.StringVar(value="2")
             direction = tk.StringVar(value="+Z")
-            opening = tk.StringVar(value="50")
+            opening = tk.StringVar(value="35")
             fields.append((wall, direction, opening))
-            controls = (("Wall and base (mm)", wall), ("Opening direction", direction), ("Opening plane (%)", opening))
+            controls = (("Shell thickness (mm)", wall), ("Opening direction", direction), ("Opening plane (%)", opening))
             for row, (label, variable) in enumerate(controls):
                 ttk.Label(page, text=label).grid(row=row, column=0, sticky="w", padx=(0, 12), pady=4)
                 if variable is direction:
@@ -878,7 +877,7 @@ def launch():
                     field = ttk.Entry(page, textvariable=variable, width=10)
                 field.grid(row=row, column=1, sticky="w")
                 variable.trace_add("write", settings_changed)
-            ttk.Label(page, text="Brush casting material into the exposed cavity. A higher opening plane retains more of the model.",
+            ttk.Label(page, text="Paint resin or silicone onto the exposed mold surface. Lower the opening plane for a shallower mold.",
                       wraplength=text_width, style="Muted.TLabel").grid(
                           row=3, column=0, columnspan=2, sticky="w", pady=(8, 12),
                       )
