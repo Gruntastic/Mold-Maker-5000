@@ -6,8 +6,8 @@ import numpy as np
 import trimesh
 from manifold3d import Manifold
 
-from mold_maker import (HALF_COLORS, OPEN_DIRECTIONS, build_mold, build_mold_parts, build_open_face, exploded_scene,
-                        export_mold, geometry_job, load_model, mold_exterior, save_halves, stl_bytes)
+from mold_maker import (OPEN_DIRECTIONS, build_mold, build_mold_parts, build_open_face, export_mold, face_up_scene,
+                        geometry_job, load_model, mold_exterior, save_halves, stl_bytes)
 from mesh_tools import check_mesh, read_mesh, repair_mesh
 from preview import preview_mesh
 
@@ -112,60 +112,50 @@ def check_export():
             else:
                 raise AssertionError("Invalid port placements should be rejected.")
 
-        # At 100% a flat-backed model keeps its full depth and open top.
         info = box_path.stat()
         source_key = box_path, info.st_size, info.st_mtime_ns
-        source_mesh = geometry_job(source_key, "check")[1]
-        brace_settings = (5, "Z", 40, 0, 3, 0.25, None, ())
-        brace_meshes, _ = geometry_job(source_key, "preview", settings=brace_settings)
-        assert len(brace_meshes) == 4
-        for halves in (brace_meshes[:2], brace_meshes[2:]):
-            positive, center, negative = exploded_scene(halves, source_mesh, 2, 40, 5, HALF_COLORS)
-            assert center[0] is source_mesh
-            assert positive[0][0][:, 2].min() + positive[1][2] > source_mesh[0][:, 2].max()
-            assert negative[0][0][:, 2].max() + negative[1][2] < source_mesh[0][:, 2].min()
-        result = geometry_job(source_key, "export_liner", settings=brace_settings, destination=path)
-        assert {file.name for file in result.iterdir()} == {"liner_Z_positive.stl", "liner_Z_negative.stl"}
+        settings = (5, "-Z", 35, 0, None, None, None, ())
+        front, back = build_mold(model, *settings)[0]
+        assert np.isclose(front.bounding_box()[5], 6) and np.isclose(back.bounding_box()[2], 6)
+        outer, _ = mold_exterior(model, 5)
+        assert np.isclose(front.volume() + back.volume(), outer.volume() - model.volume())
+        meshes, _ = geometry_job(source_key, "preview", settings=settings)
+        left, right = face_up_scene(meshes, "-Z", 5)
+        assert left[0][0][:, 0].max() + left[1][0] < right[0][0][:, 0].min() + right[1][0]
+        assert all(np.isclose(mesh[0][:, 2].max() + offset[2], 0) for mesh, offset, _ in (left, right))
+        result = geometry_job(source_key, "export", settings=settings, destination=path)
+        assert {file.name for file in result.iterdir()} == {"mold_front.stl", "mold_back.stl"}
         assert all(trimesh.load_mesh(file).is_volume for file in result.glob("*.stl"))
 
+        # The raised form has a solid central surface with no pour recess.
         settings = (3, "+Z", 100)
-        mold, note = build_open_face(model, *settings)
-        np.testing.assert_allclose(mold.bounding_box(), [-13, -18, 0, 13, 18, 43])
-        assert "Cavity depth: 40 mm" in note
-        brush_path = Manifold.cube((18, 28, 41)).translate((-9, -14, 3.5))
-        assert (mold ^ brush_path).is_empty()
-        assert np.isclose(mold.slice(1).area(), 26 * 36)
-        assert np.isclose(mold.slice(42).area(), 26 * 36 - 20 * 30)
+        form, note = build_open_face(model, *settings)
+        np.testing.assert_allclose(form.bounding_box(), [-10, -15, 0, 10, 15, 43])
+        assert "Raised surface: 40 mm" in note
+        assert np.isclose(form.slice(42).area(), 20 * 30)
         meshes, _ = geometry_job(source_key, "preview", settings=settings, open_face=True)
         assert len(meshes) == 1
         result = geometry_job(source_key, "export", settings=settings, destination=path, open_face=True)
-        assert result.name == "box_open_face_mold"
-        assert {file.name for file in result.iterdir()} == {"open_face_mold.stl"}
-        assert trimesh.load_mesh(result / "open_face_mold.stl").is_volume
+        assert result.name == "box_raised_form"
+        assert {file.name for file in result.iterdir()} == {"raised_form.stl"}
+        assert trimesh.load_mesh(result / "raised_form.stl").is_volume
 
         for direction in OPEN_DIRECTIONS:
-            mold, _ = build_open_face(round_model, 2, direction, 35)
-            assert stl_bytes(mold)
-            min_x, min_y, min_z, max_x, max_y, max_z = mold.bounding_box()
-            rim_area = (max_x - min_x) * (max_y - min_y)
-            # The curved back narrows toward the bottom. A box with a
-            # carved recess would fill the entire first layer.
-            assert mold.slice(min_z + 0.25).area() < rim_area / 3
-            assert (mold ^ Manifold.cylinder(max_z, 0.5).translate((0, 0, 2.25))).is_empty()
-        tapered = Manifold.cylinder(10, 3, 5, circular_segments=16)
-        assert stl_bytes(build_open_face(tapered, 2, "+Z", 100)[0])
-        mold, note = build_open_face(tapered, 2, "-Z", 100)
-        assert "Overhangs" in note and stl_bytes(mold)
+            form, _ = build_open_face(round_model, 2, direction, 35)
+            assert stl_bytes(form)
+            assert form.slice(3).area() > form.slice(10).area() > 0
+            probe = Manifold.cylinder(5, 0.5).translate((0, 0, 3))
+            assert np.isclose((form ^ probe).volume(), probe.volume())
         info = sphere.stat()
         meshes, note = geometry_job((sphere, info.st_size, info.st_mtime_ns), "preview",
                                     settings=(2, "+Z", 85), open_face=True)
-        assert len(meshes) == 1 and "Overhangs" in note
+        assert len(meshes) == 1 and "overhangs" in note
         try:
             build_open_face(round_model, 2, "+Z", 100)
         except ValueError as error:
-            assert "no open face" in str(error)
+            assert "no flat footprint" in str(error)
         else:
-            raise AssertionError("A closed round tip should not be exported as an open face.")
+            raise AssertionError("A round tip needs a trimmed footprint for the backing.")
 
         torus = path / "dense-torus.stl"
         trimesh.creation.torus(20, 7, major_sections=96, minor_sections=64).export(torus)
