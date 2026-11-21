@@ -6,8 +6,8 @@ import numpy as np
 import trimesh
 from manifold3d import Manifold
 
-from mold_maker import (OPEN_DIRECTIONS, build_mold, build_mold_parts, build_open_face, export_mold, geometry_job,
-                        load_model, mold_exterior, save_halves, stl_bytes)
+from mold_maker import (HALF_COLORS, OPEN_DIRECTIONS, build_mold, build_mold_parts, build_open_face, exploded_scene,
+                        export_mold, geometry_job, load_model, mold_exterior, save_halves, stl_bytes)
 from mesh_tools import check_mesh, read_mesh, repair_mesh
 from preview import preview_mesh
 
@@ -76,7 +76,9 @@ def check_export():
         model = load_model(box_path)
         closed, _, liner = build_mold_parts(model, 5, "Z", 50, 0, 3)
         poured, _, _ = build_mold_parts(model, 5, "Z", 50, 6, 3)
-        np.testing.assert_allclose(liner.volume(), (26 * 36 * 46 - 20 * 30 * 40) / 2)
+        np.testing.assert_allclose([half.volume() for half in liner], (26 * 36 * 46 - 20 * 30 * 40) / 2)
+        assert liner[0].bounding_box()[2] == liner[1].bounding_box()[5] == 0
+        assert all(abs((half ^ model).volume()) < 1e-8 for half in liner)
         np.testing.assert_allclose(poured[0].bounding_box(), [-18, -23, 0, 18, 23, 28])
         assert poured[0].volume() < closed[0].volume()
         assert np.isclose(poured[1].volume(), closed[1].volume())
@@ -113,6 +115,19 @@ def check_export():
         # At 100% a flat-backed model keeps its full depth and open top.
         info = box_path.stat()
         source_key = box_path, info.st_size, info.st_mtime_ns
+        source_mesh = geometry_job(source_key, "check")[1]
+        brace_settings = (5, "Z", 40, 0, 3, 0.25, None, ())
+        brace_meshes, _ = geometry_job(source_key, "preview", settings=brace_settings)
+        assert len(brace_meshes) == 4
+        for halves in (brace_meshes[:2], brace_meshes[2:]):
+            positive, center, negative = exploded_scene(halves, source_mesh, 2, 40, 5, HALF_COLORS)
+            assert center[0] is source_mesh
+            assert positive[0][0][:, 2].min() + positive[1][2] > source_mesh[0][:, 2].max()
+            assert negative[0][0][:, 2].max() + negative[1][2] < source_mesh[0][:, 2].min()
+        result = geometry_job(source_key, "export_liner", settings=brace_settings, destination=path)
+        assert {file.name for file in result.iterdir()} == {"liner_Z_positive.stl", "liner_Z_negative.stl"}
+        assert all(trimesh.load_mesh(file).is_volume for file in result.glob("*.stl"))
+
         settings = (3, "+Z", 100)
         mold, note = build_open_face(model, *settings)
         np.testing.assert_allclose(mold.bounding_box(), [-13, -18, 0, 13, 18, 43])
@@ -139,13 +154,18 @@ def check_export():
             assert (mold ^ Manifold.cylinder(max_z, 0.5).translate((0, 0, 2.25))).is_empty()
         tapered = Manifold.cylinder(10, 3, 5, circular_segments=16)
         assert stl_bytes(build_open_face(tapered, 2, "+Z", 100)[0])
-        for fixture, direction, expected in ((tapered, "-Z", "overhangs"), (round_model, "+Z", "no open face")):
-            try:
-                build_open_face(fixture, 2, direction, 100)
-            except ValueError as error:
-                assert expected in str(error)
-            else:
-                raise AssertionError("Hidden or closed surfaces should not be exported as open molds.")
+        mold, note = build_open_face(tapered, 2, "-Z", 100)
+        assert "Overhangs" in note and stl_bytes(mold)
+        info = sphere.stat()
+        meshes, note = geometry_job((sphere, info.st_size, info.st_mtime_ns), "preview",
+                                    settings=(2, "+Z", 85), open_face=True)
+        assert len(meshes) == 1 and "Overhangs" in note
+        try:
+            build_open_face(round_model, 2, "+Z", 100)
+        except ValueError as error:
+            assert "no open face" in str(error)
+        else:
+            raise AssertionError("A closed round tip should not be exported as an open face.")
 
         torus = path / "dense-torus.stl"
         trimesh.creation.torus(20, 7, major_sections=96, minor_sections=64).export(torus)
@@ -164,7 +184,7 @@ def check_export():
         _, preview_faces, _ = preview_mesh(model)
         assert len(preview_faces) == model.num_tri() == 147_456
         halves, note, sleeve = build_mold_parts(model, 3, "X", 50, 0, liner_thickness=2)
-        assert "sections" in note and sleeve.volume() > 0
+        assert "sections" in note and all(half.volume() > 0 for half in sleeve)
         assert (halves[0] ^ model).is_empty()
         result = save_halves(halves, dense, path, "X", silicone=True)
         assert all(trimesh.load_mesh(file).is_volume for file in result.glob("*.stl"))

@@ -52,9 +52,9 @@ class Preview(tk.Canvas):
             target.bind("<MouseWheel>", self.zoom_by)
         self.reset()
 
-    def reset(self):
-        self.yaw = math.radians(32)
-        self.pitch = math.radians(24)
+    def reset(self, *, yaw=32, pitch=24):
+        self.yaw = math.radians(yaw)
+        self.pitch = math.radians(pitch)
         self.zoom = 1
         self.pan = np.zeros(2)
         self.schedule_draw()

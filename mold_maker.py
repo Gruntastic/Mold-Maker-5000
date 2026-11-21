@@ -27,14 +27,25 @@ OPEN_DIRECTIONS = {
 MOLD_TABS = ("Direct Cast", "Silicone Brace", "Open-Face")
 OPEN_VIEW = "Open mold"
 VIEWS = ("Source model", "Exploded mold", "Assembled mold", "Positive half", "Negative half")
-LINER_VIEW = "Silicone liner cutaway"
+LINER_VIEW = "Exploded silicone liner"
 MODEL_COLOR = (132, 193, 232)
 HALF_COLORS = ((105, 208, 187), (239, 176, 114))
-LINER_COLOR = (218, 157, 230)
+LINER_COLORS = ((218, 157, 230), (163, 164, 242))
 EXTERIOR_FACE_BUDGET = 1600
 MAX_OFFSET_SECTIONS = 32
 worker_source = None
 worker_molds = {}
+
+
+def exploded_scene(halves, source, axis, split_percent, wall, colors):
+    lower = float(source[0][:, axis].min())
+    upper = float(source[0][:, axis].max())
+    split_at = lower + (upper - lower) * split_percent / 100
+    gap = max((upper - lower) * 0.15, wall)
+    offsets = np.zeros((2, 3))
+    offsets[:, axis] = upper - split_at + gap, lower - split_at - gap
+    return ((halves[0], offsets[0], colors[0]), (source, np.zeros(3), MODEL_COLOR),
+            (halves[1], offsets[1], colors[1]))
 
 
 def load_model(path):
@@ -241,7 +252,7 @@ def build_mold_parts(model, wall, axis, split_percent, diameter, liner_thickness
         if not np.isfinite(liner_thickness) or liner_thickness <= 0:
             raise ValueError("Enter a positive silicone liner thickness.")
         cavity, liner_note = mold_exterior(model, liner_thickness, thin_gap=True)
-        liner = (cavity - model).trim_by_plane(normal, split_at)
+        liner = (cavity - model).split_by_plane(normal, split_at)
     outer, exterior_note = mold_exterior(cavity, wall)
     shell = outer - cavity
     top = outer.bounding_box()[5]
@@ -307,6 +318,7 @@ def build_open_face(model, wall, direction, opening_percent):
     if cavity.status() != Error.NoError or cavity.volume() <= 0:
         raise ValueError(no_opening)
 
+    undercut = False
     for pocket in cavity.decompose():
         mesh = pocket.to_mesh64()
         triangles = mesh.vert_properties[mesh.tri_verts, :3]
@@ -318,8 +330,7 @@ def build_open_face(model, wall, direction, opening_percent):
         at_lip = np.all(np.isclose(triangles[:, :, 2], opening, rtol=0, atol=pocket.get_tolerance()), axis=1)
         if not np.any(facing_up & at_lip):
             raise ValueError(no_opening)
-        if np.any(facing_up & ~at_lip):
-            raise ValueError("This opening leaves overhangs over the casting surface. Lower the opening plane or change direction.")
+        undercut |= bool(np.any(facing_up & ~at_lip))
 
     # Offset only the selected contour, then remove everything above the
     # opening plane. Subtract the original surface to retain its detail.
@@ -327,7 +338,8 @@ def build_open_face(model, wall, direction, opening_percent):
     mold = outer.trim_by_plane((0, 0, -1), -opening) - upright
     if mold.status() != Error.NoError or mold.volume() <= 0 or len(mold.decompose()) != 1:
         raise ValueError("The settings did not produce one open shell. Try changing the thickness or opening plane.")
-    note = "\n".join(filter(None, (f"Cavity depth: {opening - low_z:.3g} mm", exterior_note)))
+    caution = "Overhangs may make brushing or release harder. Try a lower opening plane or a different direction." if undercut else ""
+    note = "\n".join(filter(None, (f"Cavity depth: {opening - low_z:.3g} mm", exterior_note, caution)))
     return mold.translate((0, 0, -mold.bounding_box()[2])), note
 
 
@@ -408,6 +420,11 @@ def geometry_job(source_key, action, repaired=False, settings=None, destination=
         cached = settings, parts, liner, note
         worker_molds[mode] = cached
     _, parts, liner, note = cached
+    if action == "export_liner":
+        if liner is None:
+            raise ValueError("Choose Silicone Brace to save liner halves.")
+        files = ((f"liner_{settings[1]}_{side}.stl", half) for side, half in zip(("positive", "negative"), liner))
+        return save_stls(destination, f"{source_path.stem}_silicone_liner", files)
     if action == "export":
         if open_face:
             folder = f"{source_path.stem}_open_face_mold"
@@ -415,7 +432,7 @@ def geometry_job(source_key, action, repaired=False, settings=None, destination=
         return save_halves(parts, source_path, destination, settings[1], silicone=silicone)
     meshes = tuple(preview_mesh(part) for part in parts)
     if liner is not None:
-        meshes += (preview_mesh(liner),)
+        meshes += tuple(preview_mesh(half) for half in liner)
     return meshes, note
 
 
@@ -542,7 +559,7 @@ def launch():
     ttk.Label(viewer, text="View", style="Section.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 10))
     view_selector = ttk.Combobox(viewer, textvariable=view, values=VIEWS[:1], state="readonly", width=24)
     view_selector.grid(row=0, column=1, sticky="w")
-    ttk.Button(viewer, text="Reset view", command=preview.reset).grid(row=0, column=2, sticky="e")
+    ttk.Button(viewer, text="Reset view", command=lambda: reset_view()).grid(row=0, column=2, sticky="e")
     ttk.Label(viewer, text="Drag to rotate  ·  Right-drag to pan  ·  Scroll to zoom", style="Muted.TLabel").grid(
         row=2, column=0, columnspan=3, sticky="w",
     )
@@ -556,6 +573,7 @@ def launch():
     fields = []
     ports = [(None, ()), (None, ())]
     save_buttons = []
+    liner_save = None
     default_views = (VIEWS[1], VIEWS[1], OPEN_VIEW, VIEWS[0])
     selected_views = list(default_views)
     results = {}
@@ -571,6 +589,7 @@ def launch():
     source_error = ""
     last_folder = None
     displayed = None
+    camera_view = None
 
     def browse_source():
         path = filedialog.askopenfilename(
@@ -606,8 +625,23 @@ def launch():
         except ValueError as error:
             return None, str(error) if str(error).startswith(("Enter", "Use")) else "Enter numbers for the mold settings."
 
+    def reset_view():
+        mode = view.get()
+        if mode == OPEN_VIEW:
+            preview.reset(pitch=65)
+        elif mode in (VIEWS[1], LINER_VIEW):
+            preview.reset(yaw=45, pitch=35)
+        elif mode in VIEWS[3:]:
+            axis = fields[notebook.index("current")][1].get()
+            face_angles = {"X": ((-66, 24), (66, 24)), "Y": ((24, 24), (156, 24)),
+                           "Z": ((32, -65), (32, 65))}
+            yaw, pitch = face_angles[axis][VIEWS[3:].index(mode)]
+            preview.reset(yaw=yaw, pitch=pitch)
+        else:
+            preview.reset()
+
     def render():
-        nonlocal displayed
+        nonlocal displayed, camera_view
         index = notebook.index("current")
         settings, invalid = current_settings(index)
         cached = results.get(index)
@@ -617,10 +651,13 @@ def launch():
         elif len(meshes) == 1:
             allowed_views = (VIEWS[0], OPEN_VIEW)
         else:
-            allowed_views = VIEWS + (LINER_VIEW,) if len(meshes) == 3 else VIEWS
+            allowed_views = VIEWS + (LINER_VIEW,) if len(meshes) == 4 else VIEWS
         mode = selected_views[index] if selected_views[index] in allowed_views else VIEWS[0]
         view_selector.configure(values=allowed_views)
         view.set(mode)
+        if camera_view != (index, mode):
+            camera_view = index, mode
+            reset_view()
         scene_key = (revision, repaired, mode, index if meshes is not None else None, id(meshes), id(source_preview))
         if scene_key != displayed:
             displayed = scene_key
@@ -629,18 +666,16 @@ def launch():
                 scene = ((source_preview, origin, MODEL_COLOR),) if source_preview is not None else ()
             elif mode == OPEN_VIEW:
                 scene = ((meshes[0], origin, HALF_COLORS[0]),)
-            elif mode == LINER_VIEW:
-                scene = ((meshes[2], origin, LINER_COLOR),)
+            elif mode in (VIEWS[1], LINER_VIEW):
+                halves = meshes[2:] if mode == LINER_VIEW else meshes[:2]
+                colors = LINER_COLORS if mode == LINER_VIEW else HALF_COLORS
+                scene = exploded_scene(halves, source_preview, AXES.index(settings[1]), settings[2],
+                                       settings[0], colors)
             elif mode in VIEWS[3:]:
                 half = VIEWS[3:].index(mode)
                 scene = ((meshes[half], origin, HALF_COLORS[half]),)
             else:
-                offset = origin.copy()
-                if mode == VIEWS[1]:
-                    axis_index = AXES.index(settings[1])
-                    extent = np.ptp(source_preview[0][:, axis_index])
-                    offset[axis_index] = max(extent * 0.2, settings[0])
-                scene = tuple(zip(meshes, (offset, -offset), HALF_COLORS))
+                scene = tuple(zip(meshes[:2], (origin, origin), HALF_COLORS))
             preview.show(scene, "Choose a source model to see it here.")
 
         for tab_index, button in enumerate(save_buttons):
@@ -648,6 +683,7 @@ def launch():
             record = results.get(tab_index)
             can_save = job is None and record is not None and record[0] == tab_settings and record[1] is not None
             button.state(["!disabled"] if can_save else ["disabled"])
+        liner_save.state(["!disabled"] if save_buttons[1].instate(["!disabled"]) else ["disabled"])
         can_repair = job is None and report is not None and bool(report.issues) and not repaired
         repair_button.state(["!disabled"] if can_repair else ["disabled"])
         can_save_repair = job is None and repaired and report is not None and report.ready
@@ -752,6 +788,8 @@ def launch():
                     results[tab_index] = settings, *result
                 elif action == "export":
                     notice = f"Saved open mold STL in {result}" if open_face else f"Saved two STL files in {result}"
+                elif action == "export_liner":
+                    notice = f"Saved two liner STLs in {result}"
                 else:
                     notice = f"Saved repaired STL to {result}"
             refresh()
@@ -830,16 +868,20 @@ def launch():
         selected_views[notebook.index("current")] = view.get()
         render()
 
-    def save_mold(index):
+    def save_mold(index, liner_only=False):
         nonlocal last_folder
-        label = "open mold STL" if MOLD_TABS[index] == "Open-Face" else "mold STLs"
+        if liner_only:
+            label = "liner STLs"
+        else:
+            label = "open mold STL" if MOLD_TABS[index] == "Open-Face" else "mold STLs"
         selected = filedialog.askdirectory(
             parent=root, title=f"Choose where to save the {label}",
             initialdir=last_folder or str(source_key[0].parent), mustexist=True,
         )
         if selected:
             last_folder = selected
-            submit("export", "Saving the mold…", settings=settings_for(index), destination=Path(selected),
+            action = "export_liner" if liner_only else "export"
+            submit(action, f"Saving {label}…", settings=settings_for(index), destination=Path(selected),
                    tab_index=index)
 
     def save_repair():
@@ -889,7 +931,7 @@ def launch():
         wall = tk.StringVar(value="5")
         axis = tk.StringVar(value="X")
         split = tk.StringVar(value="50")
-        diameter = tk.StringVar(value="6")
+        diameter = tk.StringVar(value="0" if name == "Silicone Brace" else "6")
         liner = tk.StringVar(value="3") if index == 1 else None
         keys = tk.BooleanVar(value=False)
         clearance = tk.StringVar(value="0.25")
@@ -921,7 +963,7 @@ def launch():
             settings_changed()
 
         keys.trace_add("write", toggle_keys)
-        guidance = ("Secure the master in the gap and vent the brace while pouring silicone." if liner is not None
+        guidance = ("For separate liners, leave ports off and cast each half seam-side up." if liner is not None
                     else "50% splits at the center. Enter 0 for no pour hole.")
         ttk.Label(page, text=guidance, wraplength=text_width, style="Muted.TLabel").grid(
             row=row + 2, column=0, columnspan=2, sticky="w", pady=(8, 12),
@@ -929,6 +971,9 @@ def launch():
         button = ttk.Button(page, text="Save mold STLs…", style="Accent.TButton", command=lambda tab=index: save_mold(tab))
         button.grid(row=row + 3, column=0, columnspan=2, sticky="w")
         save_buttons.append(button)
+        if liner is not None:
+            liner_save = ttk.Button(page, text="Save liner STLs…", command=lambda tab=index: save_mold(tab, liner_only=True))
+            liner_save.grid(row=row + 4, column=0, columnspan=2, sticky="w", pady=(5, 0))
 
     check_tab = ttk.Frame(notebook, padding=(12, 12))
     notebook.add(check_tab, text="Mesh Check")
