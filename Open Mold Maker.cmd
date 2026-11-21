@@ -1,8 +1,8 @@
 @echo off
 setlocal
 cd /d "%~dp0"
-if exist "dist\Casting Mold Maker 6.exe" (
-    start "" "dist\Casting Mold Maker 6.exe"
+if exist "dist\Casting Mold Maker 7.exe" (
+    start "" "dist\Casting Mold Maker 7.exe"
     exit /b
 )
 if not exist ".venv\Scripts\python.exe" (

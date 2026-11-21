@@ -19,8 +19,11 @@ from mesh_tools import check_mesh, raw_preview, read_mesh, repair_mesh, repaired
 
 
 AXES = ("X", "Y", "Z")
+SPLIT_ROTATIONS = {"X": (0, 90, 0), "Y": (-90, 0, 0), "Z": (0, 0, 0)}
+MOLD_TABS = ("Direct Cast", "Silicone Brace", "Brush-On")
 VIEWS = ("Source model", "Exploded mold", "Assembled mold", "Positive half", "Negative half")
 LINER_VIEW = "Silicone liner cutaway"
+COAT_VIEW = "Silicone coat cutaway"
 MODEL_COLOR = (132, 193, 232)
 HALF_COLORS = ((105, 208, 187), (239, 176, 114))
 LINER_COLOR = (218, 157, 230)
@@ -97,7 +100,7 @@ def make_positioned_port(cavity, top, center, diameter, label, master=None):
     raise ValueError(cannot_fit)
 
 
-def offset_in_sections(model, padding, budget):
+def offset_in_sections(model, kernel, budget):
     # Dilation distributes over a union. Limit the face count per native
     # Minkowski operation, then join the overlapping offsets.
     pending = [model]
@@ -117,8 +120,7 @@ def offset_in_sections(model, padding, budget):
         if any(half.is_empty() or half.status() != Error.NoError for half in halves):
             return None
         pending.extend(halves)
-    cube = Manifold.cube((padding,) * 3, center=True)
-    result = Manifold.batch_boolean([piece.minkowski_sum(cube) for piece in pieces], OpType.Add)
+    result = Manifold.batch_boolean([piece.minkowski_sum(kernel) for piece in pieces], OpType.Add)
     if result.status() == Error.NoError and result.volume() > 0:
         return result
     return None
@@ -140,7 +142,8 @@ def mold_exterior(model, wall, thin_gap=False):
         return reduced.minkowski_sum(Manifold.cube((padding,) * 3, center=True)), note
 
     if reduced.num_tri() <= budget * MAX_OFFSET_SECTIONS:
-        outer = offset_in_sections(reduced, 2 * (wall + tolerance), budget)
+        kernel = Manifold.cube((2 * (wall + tolerance),) * 3, center=True)
+        outer = offset_in_sections(reduced, kernel, budget)
         if outer is not None:
             uncovered = model - outer
             if uncovered.status() == Error.NoError and uncovered.is_empty():
@@ -158,7 +161,7 @@ def mold_exterior(model, wall, thin_gap=False):
 
 def add_alignment_keys(shell, halves, axis, split_at, wall, clearance):
     # Work in the split plane's coordinates so the same placement works on every axis.
-    to_model = {"X": (0, 90, 0), "Y": (-90, 0, 0), "Z": (0, 0, 0)}[axis]
+    to_model = SPLIT_ROTATIONS[axis]
     local_shell = shell.rotate(tuple(-angle for angle in to_model))
     radius = min(wall / 4, 3)
     depth = min(wall * 0.6, 4)
@@ -251,14 +254,87 @@ def build_mold_parts(model, wall, axis, split_percent, diameter, liner_thickness
         channels.append(vent)
     for channel in channels:
         shell = shell - channel
+    note = "\n".join(filter(None, (liner_note, exterior_note)))
+    return split_shell(shell, normal, split_at, wall, key_clearance), note, liner
+
+
+def split_shell(shell, normal, split_at, wall, key_clearance):
     halves = shell.split_by_plane(normal, split_at)
     if key_clearance is not None:
+        axis = AXES[normal.index(1)]
         halves = add_alignment_keys(shell, halves, axis, split_at, wall, key_clearance)
-    for half in halves:
-        if half.status() != Error.NoError or half.volume() <= 0 or len(half.decompose()) != 1:
-            raise ValueError("The settings did not produce two solid mold halves. Try a thicker wall or a different split.")
-    note = "\n".join(filter(None, (liner_note, exterior_note)))
-    return halves, note, liner
+    if any(half.status() != Error.NoError or half.volume() <= 0 or len(half.decompose()) != 1 for half in halves):
+        raise ValueError("The settings did not produce two solid mold halves. Try a thicker wall or a different split.")
+    return halves
+
+
+def brush_offsets(model, distances, tolerance):
+    # Use the same reference mesh for each rounded offset so the shell
+    # thickness and extra fit clearance are measured from the same surface.
+    budget = 800
+    reference = model if model.num_tri() <= budget else model.simplify(tolerance)
+    pads = []
+    for distance in distances:
+        # ponytail: a faceted sphere gives a predictable near-uniform offset
+        # without the cost of a high-resolution Minkowski kernel.
+        radius = distance if reference is model else distance + tolerance
+        kernel = Manifold.sphere(radius, circular_segments=12)
+        if reference.num_tri() <= budget:
+            pad = reference.minkowski_sum(kernel)
+        else:
+            pad = offset_in_sections(reference, kernel, budget)
+        if pad is None or pad.status() != Error.NoError or pad.volume() <= 0:
+            raise ValueError("This model is too detailed for a brush-on jacket. Reduce the mesh triangle count and try again.")
+        pads.append(pad)
+    uncovered = model - pads[0]
+    if uncovered.status() != Error.NoError or not uncovered.is_empty():
+        raise ValueError("The coat offset could not cover the master. Increase the coat thickness or simplify the source mesh.")
+    return pads, reference is not model
+
+
+def build_brush_on_parts(model, wall, axis, split_percent, coat_thickness, fit_clearance, flange_width,
+                         base_percent, key_clearance=None):
+    dimensions = (wall, split_percent, coat_thickness, fit_clearance, flange_width, base_percent)
+    if not np.isfinite(dimensions).all():
+        raise ValueError("Enter finite numbers for the jacket settings.")
+    if (wall <= 0 or coat_thickness <= 0 or fit_clearance < 0 or flange_width < 0
+            or not 0 < split_percent < 100 or not 0 <= base_percent < 100 or axis not in AXES[:2]):
+        raise ValueError("Use positive wall and coat thicknesses, nonnegative clearance and flange width, "
+                         "an X or Y split between 0 and 100%, and an open base from 0 to under 100%.")
+    if key_clearance is not None and (not np.isfinite(key_clearance) or key_clearance <= 0):
+        raise ValueError("Enter a positive alignment key clearance.")
+    inner_radius = coat_thickness + fit_clearance
+    outer_radius = inner_radius + wall
+    distances = (coat_thickness, inner_radius, outer_radius) if fit_clearance else (coat_thickness, outer_radius)
+    pads, simplified = brush_offsets(model, distances, min(0.3, coat_thickness / 10, wall / 10))
+    coat_envelope, cavity, outer = pads[0], pads[-2], pads[-1]
+    bounds = model.bounding_box()
+    base_z = bounds[2] + (bounds[5] - bounds[2]) * base_percent / 100
+    axis_index = AXES.index(axis)
+    split_at = bounds[axis_index] + (bounds[axis_index + 3] - bounds[axis_index]) * split_percent / 100
+    normal = tuple(int(index == axis_index) for index in range(3))
+    if flange_width:
+        rotation = SPLIT_ROTATIONS[axis]
+        local_outer = outer.rotate(tuple(-angle for angle in rotation))
+        footprint = local_outer.slice(split_at).offset(flange_width, circular_segments=16)
+        flange = footprint.extrude(2 * wall).translate((0, 0, split_at - wall)).rotate(rotation)
+        outer = outer + flange
+    base_normal = (0, 0, 1)
+    shell = (outer - cavity).trim_by_plane(base_normal, base_z)
+    coat = (coat_envelope - model).trim_by_plane(base_normal, base_z)
+    halves = split_shell(shell, normal, split_at, wall, key_clearance)
+
+    # ponytail: sample short straight pulls against the coated master.
+    # A swept-volume test would also catch collisions between samples.
+    note = f"Estimated silicone coat: {coat.volume() / 1000:.1f} mL"
+    pull = np.asarray(normal) * max(wall, coat_thickness)
+    coated_master = coat_envelope.trim_by_plane(base_normal, base_z)
+    if any((half.translate(tuple(pull * direction * fraction)) ^ coated_master).volume() > 1
+           for half, direction in zip(halves, (1, -1)) for fraction in (0.5, 1, 2)):
+        note += "\nCheck jacket removal. The straight pull crosses the planned coat."
+    if simplified:
+        note += "\nThe jacket contour was built from a simplified outer surface."
+    return halves, note, coat.trim_by_plane(normal, split_at)
 
 
 def build_mold(model, wall, axis, split_percent, diameter, liner_thickness=None, key_clearance=None,
@@ -296,9 +372,10 @@ def stl_bytes(half):
     raise ValueError("A mold half lost mesh detail during STL export. Try moving the split or changing the wall thickness.")
 
 
-def save_halves(halves, source, output, axis, silicone=False):
-    part = "brace" if silicone else "mold"
-    folder_name = f"{source.stem}_{'silicone_brace' if silicone else 'mold'}"
+def save_halves(halves, source, output, axis, silicone=False, brush_on=False):
+    part = "jacket" if brush_on else "brace" if silicone else "mold"
+    kind = "brush_on_jacket" if brush_on else "silicone_brace" if silicone else "mold"
+    folder_name = f"{source.stem}_{kind}"
     with tempfile.TemporaryDirectory(prefix=".mold-", dir=output) as staging:
         staged = Path(staging)
         for side, half in zip(("positive", "negative"), halves):
@@ -312,7 +389,7 @@ def save_halves(halves, source, output, axis, silicone=False):
     return destination
 
 
-def geometry_job(source_key, action, repaired=False, settings=None, destination=None):
+def geometry_job(source_key, action, repaired=False, settings=None, destination=None, brush_on=False):
     global worker_source
     source_path = source_key[0]
     revision = source_key, repaired
@@ -339,15 +416,17 @@ def geometry_job(source_key, action, repaired=False, settings=None, destination=
             staged.replace(destination)
         return destination
 
-    silicone = settings[4] is not None
-    cached = worker_molds.get(silicone)
+    silicone = not brush_on and settings[4] is not None
+    mode = "brush_on" if brush_on else "brace" if silicone else "direct"
+    cached = worker_molds.get(mode)
     if cached is None or cached[0] != settings:
-        halves, note, liner = build_mold_parts(model, *settings)
+        build_parts = build_brush_on_parts if brush_on else build_mold_parts
+        halves, note, liner = build_parts(model, *settings)
         cached = settings, halves, liner, note
-        worker_molds[silicone] = cached
+        worker_molds[mode] = cached
     _, halves, liner, note = cached
     if action == "export":
-        return save_halves(halves, source_path, destination, settings[1], silicone=silicone)
+        return save_halves(halves, source_path, destination, settings[1], silicone=silicone, brush_on=brush_on)
     meshes = tuple(preview_mesh(half) for half in halves)
     if liner is not None:
         meshes += (preview_mesh(liner),)
@@ -488,11 +567,10 @@ def launch():
     notebook = ttk.Notebook(panel)
     notebook.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(16, 0))
     notebook.enable_traversal()
-    tabs = []
     fields = []
     ports = [(None, ()), (None, ())]
     save_buttons = []
-    selected_views = [VIEWS[1], VIEWS[1], VIEWS[0]]
+    selected_views = [VIEWS[1]] * len(MOLD_TABS) + [VIEWS[0]]
     results = {}
     executor = ProcessPoolExecutor(max_workers=1, mp_context=get_context("spawn"))
     source_key = None
@@ -518,16 +596,19 @@ def launch():
     def settings_for(index):
         if index >= len(fields):
             return None
-        wall, axis, split, diameter, liner, keys, clearance = fields[index]
-        numeric = float(wall.get()), float(split.get()), float(diameter.get())
-        thickness = float(liner.get()) if liner is not None else None
+        wall, axis, split, diameter, liner, keys, clearance, brush = fields[index]
+        wall_mm, split_percent = float(wall.get()), float(split.get())
         key_gap = float(clearance.get()) if keys.get() else None
+        if key_gap is not None and (not np.isfinite(key_gap) or key_gap <= 0):
+            raise ValueError("Enter a positive alignment key clearance.")
+        if brush is not None:
+            return wall_mm, axis.get(), split_percent, *(float(value.get()) for value in brush), key_gap
+        numeric = wall_mm, split_percent, float(diameter.get())
+        thickness = float(liner.get()) if liner is not None else None
         if not np.isfinite(numeric).all() or (thickness is not None and not np.isfinite(thickness)):
             raise ValueError("Enter finite numbers for the mold settings.")
         if numeric[0] <= 0 or not 0 < numeric[1] < 100 or numeric[2] < 0 or (thickness is not None and thickness <= 0):
             raise ValueError("Use positive thicknesses, a split between 0 and 100%, and a pour diameter of 0 or more.")
-        if key_gap is not None and (not np.isfinite(key_gap) or key_gap <= 0):
-            raise ValueError("Enter a positive alignment key clearance.")
         return numeric[0], axis.get(), numeric[1], numeric[2], thickness, key_gap, *ports[index]
 
     def current_settings(index):
@@ -544,7 +625,7 @@ def launch():
         meshes, note = cached[1:] if cached is not None and cached[0] == settings else (None, "")
         allowed_views = VIEWS
         if meshes is not None and len(meshes) == 3:
-            allowed_views += (LINER_VIEW,)
+            allowed_views += (COAT_VIEW if index == 2 else LINER_VIEW,)
         if meshes is None:
             allowed_views = VIEWS[:1]
         mode = selected_views[index] if selected_views[index] in allowed_views else VIEWS[0]
@@ -556,7 +637,7 @@ def launch():
             origin = np.zeros(3)
             if mode == VIEWS[0]:
                 scene = ((source_preview, origin, MODEL_COLOR),) if source_preview is not None else ()
-            elif mode == LINER_VIEW:
+            elif mode in (LINER_VIEW, COAT_VIEW):
                 scene = ((meshes[2], origin, LINER_COLOR),)
             elif mode in VIEWS[3:]:
                 half = VIEWS[3:].index(mode)
@@ -626,7 +707,8 @@ def launch():
     def submit(action, label, settings=None, destination=None, tab_index=None, do_repair=False):
         nonlocal executor, job
         current_revision = revision
-        args = (source_key, action, repaired or do_repair, settings, destination)
+        brush_on = tab_index is not None and MOLD_TABS[tab_index] == "Brush-On"
+        args = (source_key, action, repaired or do_repair, settings, destination, brush_on)
         job = label
         progress.grid()
         progress.start(15)
@@ -707,7 +789,7 @@ def launch():
         settings, _ = current_settings(index)
         record = results.get(index)
         if report is not None and report.ready and settings is not None and (record is None or record[0] != settings):
-            submit("preview", f"Preparing {tabs[index].lower()} preview…", settings=settings, tab_index=index)
+            submit("preview", f"Preparing {MOLD_TABS[index].lower()} preview…", settings=settings, tab_index=index)
 
     def schedule(delay=340):
         nonlocal timer
@@ -729,7 +811,7 @@ def launch():
         notice = source_error = ""
         load_pending = bool(source.get().strip())
         results.clear()
-        selected_views[:2] = VIEWS[1], VIEWS[1]
+        selected_views[:len(MOLD_TABS)] = [VIEWS[1]] * len(MOLD_TABS)
         preview.reset()
         summarize()
         schedule()
@@ -764,7 +846,8 @@ def launch():
         )
         if selected:
             last_folder = selected
-            submit("export", "Saving the mold STLs…", settings=settings_for(index), destination=Path(selected))
+            submit("export", "Saving the mold STLs…", settings=settings_for(index), destination=Path(selected),
+                   tab_index=index)
 
     def save_repair():
         filename = filedialog.asksaveasfilename(
@@ -782,27 +865,33 @@ def launch():
     ttk.Entry(panel, textvariable=source, width=21).grid(row=1, column=1, sticky="ew")
     ttk.Button(panel, text="Browse…", width=8, command=browse_source).grid(row=1, column=2, padx=(8, 0))
 
-    for index, name in enumerate(("Direct Cast", "Silicone Brace")):
-        tabs.append(name)
+    for index, name in enumerate(MOLD_TABS):
+        brush_on = name == "Brush-On"
         page = ttk.Frame(notebook, padding=(12, 12))
         notebook.add(page, text=name)
         page.columnconfigure(1, weight=1)
-        wall = tk.StringVar(value="5")
+        wall = tk.StringVar(value="4" if brush_on else "5")
         axis = tk.StringVar(value="X")
         split = tk.StringVar(value="50")
-        diameter = tk.StringVar(value="6")
+        diameter = None if brush_on else tk.StringVar(value="6")
         liner = tk.StringVar(value="3") if index == 1 else None
         keys = tk.BooleanVar(value=False)
         clearance = tk.StringVar(value="0.25")
-        fields.append((wall, axis, split, diameter, liner, keys, clearance))
-        controls = [("Wall thickness (mm)", wall), ("Split axis", axis), ("Split position (%)", split),
-                    ("Pour hole diameter (mm)", diameter)]
+        brush = tuple(tk.StringVar(value=value) for value in ("3", "0.35", "6", "0")) if brush_on else None
+        fields.append((wall, axis, split, diameter, liner, keys, clearance, brush))
+        controls = [("Wall thickness (mm)", wall), ("Split axis", axis), ("Split position (%)", split)]
+        if brush_on:
+            controls.extend(zip(("Silicone coat (mm)", "Jacket clearance (mm)", "Clamp flange (mm)",
+                                 "Open base height (%)"), brush))
+        else:
+            controls.append(("Pour hole diameter (mm)", diameter))
         if liner is not None:
             controls.insert(1, ("Silicone liner (mm)", liner))
         for row, (label, variable) in enumerate(controls):
             ttk.Label(page, text=label).grid(row=row, column=0, sticky="w", padx=(0, 12), pady=4)
             if variable is axis:
-                field = ttk.Combobox(page, textvariable=variable, values=AXES, width=6, state="readonly")
+                field = ttk.Combobox(page, textvariable=variable, values=AXES[:2] if brush_on else AXES,
+                                     width=6, state="readonly")
             else:
                 field = ttk.Entry(page, textvariable=variable, width=10)
             field.grid(row=row, column=1, sticky="w")
@@ -811,7 +900,8 @@ def launch():
         ttk.Checkbutton(page, text="Add alignment keys", variable=keys).grid(
             row=row, column=0, sticky="w", pady=4,
         )
-        ttk.Button(page, text="Ports…", command=lambda tab=index: edit_ports(tab)).grid(row=row, column=1, sticky="w")
+        if not brush_on:
+            ttk.Button(page, text="Ports…", command=lambda tab=index: edit_ports(tab)).grid(row=row, column=1, sticky="w")
         ttk.Label(page, text="Key clearance (mm)").grid(row=row + 1, column=0, sticky="w", padx=(0, 12), pady=4)
         clearance_entry = ttk.Entry(page, textvariable=clearance, width=10, state="disabled")
         clearance_entry.grid(row=row + 1, column=1, sticky="w")
@@ -822,12 +912,17 @@ def launch():
             settings_changed()
 
         keys.trace_add("write", toggle_keys)
-        guidance = ("Secure the master in the gap and vent the brace while pouring silicone." if liner is not None
-                    else "50% splits at the center. Enter 0 for no pour hole.")
+        if brush_on:
+            guidance = "Brush silicone onto the master. Fit the printed jacket around the cured coat."
+        elif liner is not None:
+            guidance = "Secure the master in the gap and vent the brace while pouring silicone."
+        else:
+            guidance = "50% splits at the center. Enter 0 for no pour hole."
         ttk.Label(page, text=guidance, wraplength=text_width, style="Muted.TLabel").grid(
             row=row + 2, column=0, columnspan=2, sticky="w", pady=(8, 12),
         )
-        button = ttk.Button(page, text="Save mold STLs…", style="Accent.TButton", command=lambda tab=index: save_mold(tab))
+        label = "Save jacket STLs…" if brush_on else "Save mold STLs…"
+        button = ttk.Button(page, text=label, style="Accent.TButton", command=lambda tab=index: save_mold(tab))
         button.grid(row=row + 3, column=0, columnspan=2, sticky="w")
         save_buttons.append(button)
 

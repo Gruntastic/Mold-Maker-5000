@@ -4,7 +4,7 @@ Turn a watertight STL, OBJ, or 3MF solid into two matching mold halves. The app 
 
 ## Run on Windows
 
-Double-click **Casting Mold Maker 6.exe** in the `dist` folder or run **Open Mold Maker.cmd**. The bundled app runs on 64-bit Windows and includes Python and its dependencies. It draws at the Windows system DPI. Moving the window to a monitor with a different scaling factor can cause Windows to stretch it.
+Double-click **Casting Mold Maker 7.exe** in the `dist` folder or run **Open Mold Maker.cmd**. The bundled app runs on 64-bit Windows and includes Python and its dependencies. It draws at the Windows system DPI. Moving the window to a monitor with a different scaling factor can cause Windows to stretch it.
 
 ## Make a mold
 
@@ -25,7 +25,7 @@ For dense models, the app may simplify the exterior within its offset tolerance 
 
 Open **Mesh Check** after loading a file. The report lists open edges, non-manifold edges, duplicate and degenerate faces, winding issues, and the number of closed shells when available. **Repair mesh** welds tiny gaps, removes duplicate or degenerate faces, corrects winding, and fills small holes and suitable convex planar openings. Review the updated report and the source preview after repair.
 
-A successful repair is used by both mold tabs. **Save repaired STL…** writes a separate copy. Disconnected solids, difficult intersections, and complex holes may need manual editing. The checker tests mesh topology and mold compatibility. It does not certify that the mesh is free of self-intersections.
+A successful repair is used by all mold tabs. **Save repaired STL…** writes a separate copy. Disconnected solids, difficult intersections, and complex holes may need manual editing. The checker tests mesh topology and mold compatibility. It does not certify that the mesh is free of self-intersections.
 
 ## Cast a silicone liner in a printed brace
 
@@ -37,6 +37,14 @@ A successful repair is used by both mold tabs. **Save repaired STL…** writes a
 
 For highly detailed meshes, silicone mode asks for a simplified source if it cannot keep a thin gap around the contours.
 
+## Make a jacket for brush-on silicone
+
+1. Open **Brush-On** and load the positive master with the intended opening facing down along −Z. **Open base height (%)** sets the bottom edge of the jacket and coat preview. At 0% it sits at the lowest point on the master. Raising it leaves the lower portion outside the jacket, so use that setting when that portion can be left uncovered or supported separately.
+2. Set **Silicone coat (mm)** to the planned cured thickness and **Jacket clearance (mm)** to the extra space for fit. The preview uses a rounded offset, and the status reports the estimated volume of the coat. The quantity you mix also needs to account for application losses and variations in coat thickness.
+3. Set the jacket wall thickness, choose an X or Y split, and set **Clamp flange (mm)** for a lip along the seam. Enter 0 to omit the flange. Optional alignment keys register the two printed halves. If the app cannot build two connected halves, try a different split or reduce the flange width.
+4. Check the **Silicone coat cutaway**, then select **Save jacket STLs…** to export the two `jacket_` files. The removal check samples short, straight pulls of the jacket halves. Check deep undercuts and curved or rounded bases by dry-fitting before casting.
+5. Brush the silicone onto the original master following the silicone supplier’s instructions. After curing, dry-fit the printed halves around the coat and check that they close without squeezing it or leaving large unsupported gaps. Open the jacket to remove the master. Prepare an opening in the silicone for casting, then reassemble and clamp the supported mold.
+
 ## Build from source and verify the export
 
 From the project folder on 64-bit Windows with Python 3.14 installed, run:
@@ -45,5 +53,5 @@ From the project folder on 64-bit Windows with Python 3.14 installed, run:
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt pyinstaller==6.22.3
 .\.venv\Scripts\python.exe test_mold.py
-.\.venv\Scripts\python.exe -m PyInstaller --noconfirm --onefile --windowed --name "Casting Mold Maker 6" --manifest (Resolve-Path windows.manifest).Path --specpath build --collect-data trimesh mold_maker.py
+.\.venv\Scripts\python.exe -m PyInstaller --noconfirm --onefile --windowed --name "Casting Mold Maker 7" --manifest (Resolve-Path windows.manifest).Path --specpath build --collect-data trimesh mold_maker.py
 ```

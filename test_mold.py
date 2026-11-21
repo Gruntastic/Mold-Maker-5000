@@ -6,7 +6,8 @@ import numpy as np
 import trimesh
 from manifold3d import Manifold
 
-from mold_maker import build_mold, build_mold_parts, export_mold, load_model, mold_exterior, save_halves
+from mold_maker import (build_brush_on_parts, build_mold, build_mold_parts, export_mold, geometry_job,
+                        load_model, mold_exterior, save_halves)
 from mesh_tools import check_mesh, read_mesh, repair_mesh
 from preview import preview_mesh
 
@@ -108,6 +109,32 @@ def check_export():
                 assert expected in str(error)
             else:
                 raise AssertionError("Invalid port placements should be rejected.")
+
+        for axis in ("X", "Y"):
+            plain, _, _ = build_brush_on_parts(model, 4, axis, 50, 3, 0.35, 0, 25)
+            settings = (4, axis, 50, 3, 0.35, 6, 25, 0.25)
+            jacket, _, coat = build_brush_on_parts(model, *settings)
+            assembled = jacket[0] + jacket[1]
+            assert assembled.volume() > sum(half.volume() for half in plain)
+            np.testing.assert_allclose([half.bounding_box()[2] for half in jacket], [-10, -10])
+            # The base opens into the cavity and the jacket stays clear of
+            # both the master and the estimated silicone coat.
+            probe = Manifold.cylinder(2, 2).translate((0, 0, -11))
+            assert (assembled ^ probe).is_empty()
+            assert (assembled ^ model).is_empty()
+            assert (assembled ^ coat).is_empty()
+
+            info = box_path.stat()
+            source_key = box_path, info.st_size, info.st_mtime_ns
+            meshes, note = geometry_job(source_key, "preview", settings=settings, brush_on=True)
+            assert len(meshes) == 3 and "Estimated silicone coat" in note
+            result = geometry_job(source_key, "export", settings=settings, destination=path, brush_on=True)
+            assert result.name.startswith("box_brush_on_jacket")
+            assert {file.name for file in result.iterdir()} == {f"jacket_{axis}_{side}.stl" for side in ("positive", "negative")}
+            assert all(trimesh.load_mesh(file).is_volume for file in result.glob("*.stl"))
+
+        _, note, _ = build_brush_on_parts(round_model, 4, "X", 75, 3, 0.35, 6, 0)
+        assert "Check jacket removal" in note
 
         torus = path / "dense-torus.stl"
         trimesh.creation.torus(20, 7, major_sections=96, minor_sections=64).export(torus)
