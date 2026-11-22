@@ -4,20 +4,20 @@ Turn a watertight STL, OBJ, or 3MF model into a negative mold. **Direct Cast** c
 
 ## Run on Windows
 
-Double-click **Casting Mold Maker 14.exe** in the `dist` folder or run **Open Mold Maker.cmd**. The bundled app runs on 64-bit Windows and includes Python and its dependencies. It draws at the Windows system DPI. Moving the window to a monitor with a different scaling factor can cause Windows to stretch it.
+Double-click **Casting Mold Maker 15.exe** in the `dist` folder or run **Open Mold Maker.cmd**. The bundled app runs on 64-bit Windows and includes Python and its dependencies. It draws at the Windows system DPI. Moving the window to a monitor with a different scaling factor can cause Windows to stretch it.
 
 ## Make a mold
 
 1. Open **Direct Cast** to make a two-piece mold for casting resin or silicone, and choose a source model. The app checks the mesh and builds a preview automatically. STL and OBJ coordinates are read as millimeters. 3MF dimensions are converted from the file’s declared units.
 2. Set the wall thickness. The default is 5 mm of padding from the cavity’s bounding box to each outside face.
-3. Choose **Front direction** along X or Y. The box always splits along a vertical plane, with both halves extending through its full height. Set **Split position (%)** to move the seam from the back toward the front. At 50% the split is centered.
+3. Choose **Front direction** along X or Y. Both halves extend through the box's full height. **Follow model contour** is on by default. It traces a mating surface through the part so curved shells have a raised core on one half and a matching recess on the other. **Split position (%)** controls the seam away from the model. Turn contour following off to use a flat vertical split.
 4. Leave the pour hole on **Auto** to size a top opening that reaches the cavity. Enter a diameter in millimeters to set the size yourself, or enter 0 to omit the inlet.
 5. Open **Ports…** to enter a pour center as `X, Y` or add vents as `X, Y, diameter`, one vent per line. X and Y are measured in millimeters from the model’s bounding-box center. The channels run along +Z from the cavity to the exterior. Leave the pour center blank for automatic placement, or set the pour diameter to 0 to omit the inlet while keeping any vents.
 6. Enable **Add alignment keys** for two pins and matching sockets. **Key clearance (mm)** applies radially and at the socket floor. The default is 0.25 mm. If the app cannot fit two keys, try a thicker wall, move the split, or reduce the clearance. Dry-fit the printed halves before casting.
 7. **Exploded mold** shows the two negative halves pulled apart with the positive model in the center. **Front and back** lays both cavity faces up with the same end at the top. **Fit in back half** shows the positive in its exact seated position. **Assembled mold** shows the closed box. Drag to rotate, right-drag to pan, and scroll to zoom.
 8. Click **Save mold STLs…** to export two separate files, `mold_front.stl` and `mold_back.stl`.
 
-The app accepts a single closed, connected solid. An **Undercuts** warning means the shape can obstruct a straight pull from the chosen split, even when the model fits in its seated position. Try a different split for a rigid mold, or use a flexible mold for shapes that lock in. Use clamps to hold the halves closed during casting and place vents at high points where air could collect.
+The app accepts a single closed, connected solid. The contoured seam is sampled from the model. The cavity itself is cut from the original mesh. Overlapping features along the pull direction may still trap a rigid casting. Use the warning and a physical dry fit to check release, or use a flexible mold for shapes that lock in. Use clamps to hold the halves closed and place vents at high points where air could collect.
 
 Use **Positive model** to view the part by itself and **Save positive STL…** to save a separate printable copy from any tab. It retains the source scale and orientation and is centered to match the Direct Cast assembly. The source file stays intact.
 
@@ -48,5 +48,5 @@ From the project folder on 64-bit Windows with Python 3.14 installed, run:
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt pyinstaller==6.22.3
 .\.venv\Scripts\python.exe test_mold.py
-.\.venv\Scripts\python.exe -m PyInstaller --noconfirm --onefile --windowed --name "Casting Mold Maker 14" --manifest (Resolve-Path windows.manifest).Path --specpath build --collect-data trimesh mold_maker.py
+.\.venv\Scripts\python.exe -m PyInstaller --noconfirm --onefile --windowed --name "Casting Mold Maker 15" --manifest (Resolve-Path windows.manifest).Path --specpath build --collect-data trimesh mold_maker.py
 ```

@@ -15,6 +15,7 @@ import numpy as np
 import trimesh
 
 from preview import Preview, preview_mesh
+from parting import contoured_parting, split_contoured
 from mesh_tools import check_mesh, raw_preview, read_mesh, repair_mesh, repaired_stl
 
 
@@ -211,10 +212,11 @@ def mold_exterior(model, wall, thin_gap=False, *, require_contour=False):
     return outer, "This detailed model uses a convex exterior that may fill outer recesses."
 
 
-def add_alignment_keys(shell, halves, axis, split_at, wall, clearance):
+def add_alignment_keys(shell, halves, axis, split_at, wall, clearance, cutter=None):
     # Work in the split plane's coordinates so the same placement works on every axis.
     to_model = {"X": (0, 90, 0), "Y": (-90, 0, 0), "Z": (0, 0, 0)}[axis]
     local_shell = shell.rotate(tuple(-angle for angle in to_model))
+    local_cutter = cutter.rotate(tuple(-angle for angle in to_model)) if cutter is not None else None
     radius = min(wall / 4, 3)
     depth = min(wall * 0.6, 4)
     margin = min(wall / 10, 0.5)
@@ -244,9 +246,14 @@ def add_alignment_keys(shell, halves, axis, split_at, wall, clearance):
             # Check the full socket depth and the material supporting the pin.
             probe = reserve.translate((x, y, split_at - depth - clearance - margin))
             outside = probe - local_shell
-            if outside.status() == Error.NoError and outside.is_empty():
-                selected.append((x, y))
-                break
+            if outside.status() != Error.NoError or not outside.is_empty():
+                continue
+            if local_cutter is not None:
+                ahead, behind = probe.split_by_plane((0, 0, 1), split_at)
+                if abs((ahead - local_cutter).volume()) > 1e-8 or abs((behind ^ local_cutter).volume()) > 1e-8:
+                    continue
+            selected.append((x, y))
+            break
         else:
             raise ValueError(no_fit)
         distances = np.linalg.norm(candidates - selected[-1], axis=1)
@@ -277,7 +284,7 @@ def release_note(cavity, axis, split_at):
 
 
 def build_mold_parts(model, wall, axis, split_percent, diameter, liner_thickness=None, key_clearance=None,
-                     pour_center=None, vents=()):
+                     pour_center=None, vents=(), follow_contour=False):
     numbers = (wall, split_percent) if diameter is None else (wall, split_percent, diameter)
     if not np.isfinite(numbers).all():
         raise ValueError("Enter finite numbers for the mold settings.")
@@ -301,13 +308,13 @@ def build_mold_parts(model, wall, axis, split_percent, diameter, liner_thickness
     normal = tuple(int(index == axis_index) for index in range(3))
 
     cavity = model
-    liner = None
+    liner_material = None
     liner_note = ""
     if liner_thickness is not None:
         if not np.isfinite(liner_thickness) or liner_thickness <= 0:
             raise ValueError("Enter a positive silicone liner thickness.")
         cavity, liner_note = mold_exterior(model, liner_thickness, thin_gap=True)
-        liner = (cavity - model).split_by_plane(normal, split_at)
+        liner_material = cavity - model
     lower_corner, upper_corner = np.asarray(cavity.bounding_box()).reshape(2, 3)
     outer = Manifold.cube(tuple(upper_corner - lower_corner + 2 * wall)).translate(tuple(lower_corner - wall))
     shell = outer - cavity
@@ -342,15 +349,25 @@ def build_mold_parts(model, wall, axis, split_percent, diameter, liner_thickness
         channels.append(vent)
     for channel in channels:
         shell = shell - channel
-    halves = shell.split_by_plane(normal, split_at)
+    cutter = None
+    if follow_contour:
+        cutter, hidden = contoured_parting(cavity, axis, split_at, wall, guide=master)
+        halves = split_contoured(shell, cutter)
+        liner = split_contoured(liner_material, cutter) if liner_material is not None else None
+        draw_note = ("Some details overlap along the pull direction. Use a flexible mold for those undercuts."
+                     if hidden else "")
+    else:
+        halves = shell.split_by_plane(normal, split_at)
+        liner = liner_material.split_by_plane(normal, split_at) if liner_material is not None else None
+        draw_note = release_note(cavity, axis_index, split_at)
     if key_clearance is not None:
-        halves = add_alignment_keys(shell, halves, axis, split_at, wall, key_clearance)
+        halves = add_alignment_keys(shell, halves, axis, split_at, wall, key_clearance, cutter=cutter)
     for half in halves:
         if half.status() != Error.NoError or half.volume() <= 0 or len(half.decompose()) != 1:
             raise ValueError("The settings did not produce two solid mold halves. Try a thicker wall or a different split.")
     if diameter == 0:
         port_note = "Add a pour hole before casting with the halves closed."
-    note = "\n".join(filter(None, (liner_note, port_note, release_note(cavity, axis_index, split_at))))
+    note = "\n".join(filter(None, (liner_note, port_note, draw_note)))
     if front_is_negative:
         halves = halves[::-1]
         if liner is not None:
@@ -685,7 +702,7 @@ def launch():
             settings = float(wall.get()), direction.get(), float(opening.get())
             validate_open_face(*settings)
             return settings
-        wall, axis, split, diameter, keys, clearance, around_master, silicone_gap = fields[index]
+        wall, axis, split, diameter, keys, clearance, around_master, silicone_gap, follow_contour = fields[index]
         wall_mm, split_percent = float(wall.get()), float(split.get())
         pour = diameter.get().strip()
         diameter_mm = None if pour.lower() == "auto" else float(pour)
@@ -699,7 +716,7 @@ def launch():
             raise ValueError("Enter a positive alignment key clearance.")
         if liner is not None and (not np.isfinite(liner) or liner <= 0):
             raise ValueError("Enter a positive silicone gap around the master.")
-        return wall_mm, axis.get(), split_percent, diameter_mm, liner, key_gap, *ports
+        return wall_mm, axis.get(), split_percent, diameter_mm, liner, key_gap, *ports, follow_contour.get()
 
     def current_settings(index):
         try:
@@ -1030,7 +1047,8 @@ def launch():
         clearance = tk.StringVar(value="0.25")
         around_master = tk.BooleanVar(value=False)
         silicone_gap = tk.StringVar(value="3")
-        fields.append((wall, axis, split, diameter, keys, clearance, around_master, silicone_gap))
+        follow_contour = tk.BooleanVar(value=True)
+        fields.append((wall, axis, split, diameter, keys, clearance, around_master, silicone_gap, follow_contour))
         controls = [("Wall thickness (mm)", wall), ("Front direction", axis), ("Split position (%)", split),
                     ("Pour hole (mm or Auto)", diameter)]
         for row, (label, variable) in enumerate(controls):
@@ -1042,6 +1060,11 @@ def launch():
             field.grid(row=row, column=1, sticky="w")
             variable.trace_add("write", settings_changed)
         row = len(controls)
+        ttk.Checkbutton(page, text="Follow model contour", variable=follow_contour).grid(
+            row=row, column=0, columnspan=2, sticky="w", pady=4,
+        )
+        follow_contour.trace_add("write", settings_changed)
+        row += 1
         ttk.Checkbutton(page, text="Add alignment keys", variable=keys).grid(
             row=row, column=0, sticky="w", pady=4,
         )
@@ -1069,7 +1092,7 @@ def launch():
             settings_changed()
 
         around_master.trace_add("write", toggle_master)
-        ttk.Label(page, text="The box opens at a vertical seam. Auto fits a pour opening to the cavity.",
+        ttk.Label(page, text="Follow the contour for a matching raised core and recessed cavity.",
                   wraplength=text_width, style="Muted.TLabel").grid(
             row=row + 4, column=0, columnspan=2, sticky="w", pady=(8, 12),
         )

@@ -137,6 +137,14 @@ def check_export():
         assert (auto[0] + auto[1]).slice(24).area() < 30 * 40
         _, note = build_mold(round_model, 5, "+Y", 65, 0)
         assert "Undercuts" in note
+
+        dome = (Manifold.sphere(12, 32) - Manifold.sphere(9, 32)).trim_by_plane((0, 1, 0), 0)
+        front, back = build_mold_parts(dome, 5, "+Y", 50, 0, follow_contour=True)[0]
+        ray = (0.2, -10, 0.3), (0.2, 20, 0.3)
+        inner, outer = (h.position[1] for h in dome.ray_cast(*ray))
+        assert np.isclose(front.ray_cast(*ray)[0].position[1], outer)
+        assert np.isclose(back.ray_cast(*ray)[-1].position[1], inner)
+        assert all(stl_bytes(half) for half in (front, back))
         for liner_thickness in (None, 3):
             settings = (5, "-Y", 35, 0, liner_thickness, 0.25, None, ())
             meshes, _ = geometry_job(source_key, "preview", settings=settings)
