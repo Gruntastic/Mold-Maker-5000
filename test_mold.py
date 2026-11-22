@@ -6,8 +6,8 @@ import numpy as np
 import trimesh
 from manifold3d import Manifold
 
-from mold_maker import (OPEN_DIRECTIONS, build_mold, build_mold_parts, build_open_face, export_mold, face_up_scene,
-                        geometry_job, load_model, mold_exterior, save_halves, stl_bytes)
+from mold_maker import (OPEN_DIRECTIONS, build_mold, build_mold_parts, build_open_face, exploded_scene, export_mold,
+                        face_up_scene, geometry_job, load_model, mold_exterior, save_halves, stl_bytes)
 from mesh_tools import check_mesh, read_mesh, repair_mesh
 from preview import preview_mesh
 
@@ -127,35 +127,55 @@ def check_export():
         assert {file.name for file in result.iterdir()} == {"mold_front.stl", "mold_back.stl"}
         assert all(trimesh.load_mesh(file).is_volume for file in result.glob("*.stl"))
 
-        # The raised form has a solid central surface with no pour recess.
+        source_preview = geometry_job(source_key, "check")[1]
+        for liner_thickness in (None, 3):
+            settings = (5, "-Z", 35, 0, liner_thickness, 0.25, None, ())
+            meshes, _ = geometry_job(source_key, "preview", settings=settings)
+            front_view, center, back_view = exploded_scene(meshes, source_preview, "-Z", 5)
+            assert center[0] is source_preview
+            assert front_view[0][0][:, 2].max() + front_view[1][2] < source_preview[0][:, 2].min()
+            assert back_view[0][0][:, 2].min() + back_view[1][2] > source_preview[0][:, 2].max()
+        front, back = build_mold(model, *settings)[0]
+        shell = front + back
+        inside_gap = Manifold.cube((1, 1, 1)).translate((11, 0, 0))
+        outside_gap = inside_gap.translate((3, 0, 0))
+        assert (shell ^ inside_gap).is_empty()
+        assert np.isclose((shell ^ outside_gap).volume(), 1)
+        result = geometry_job(source_key, "export", settings=settings, destination=path)
+        assert {file.name for file in result.iterdir()} == {"brace_front.stl", "brace_back.stl"}
+        assert all(trimesh.load_mesh(file).is_volume for file in result.glob("*.stl"))
+
         settings = (3, "+Z", 100)
-        form, note = build_open_face(model, *settings)
-        np.testing.assert_allclose(form.bounding_box(), [-10, -15, 0, 10, 15, 43])
-        assert "Raised surface: 40 mm" in note
-        assert np.isclose(form.slice(42).area(), 20 * 30)
+        impression, note = build_open_face(model, *settings)
+        np.testing.assert_allclose(impression.bounding_box(), [-13, -18, 0, 13, 18, 43])
+        assert "Impression depth: 40 mm" in note
+        assert np.isclose(impression.slice(42).area(), 26 * 36 - 20 * 30)
         meshes, _ = geometry_job(source_key, "preview", settings=settings, open_face=True)
         assert len(meshes) == 1
         result = geometry_job(source_key, "export", settings=settings, destination=path, open_face=True)
-        assert result.name == "box_raised_form"
-        assert {file.name for file in result.iterdir()} == {"raised_form.stl"}
-        assert trimesh.load_mesh(result / "raised_form.stl").is_volume
+        assert result.name == "box_brush_on_mold"
+        assert {file.name for file in result.iterdir()} == {"brush_on_mold.stl"}
+        assert trimesh.load_mesh(result / "brush_on_mold.stl").is_volume
 
         for direction in OPEN_DIRECTIONS:
-            form, _ = build_open_face(round_model, 2, direction, 35)
-            assert stl_bytes(form)
-            assert form.slice(3).area() > form.slice(10).area() > 0
-            probe = Manifold.cylinder(5, 0.5).translate((0, 0, 3))
-            assert np.isclose((form ^ probe).volume(), probe.volume())
+            impression, _ = build_open_face(round_model, 2, direction, 25)
+            assert stl_bytes(impression)
+            probe = Manifold.cylinder(12, 0.5).translate((0, 0, 2.25))
+            assert (impression ^ probe).is_empty()
+        tapered = Manifold.cylinder(10, 3, 5, circular_segments=16)
+        front_impression = build_open_face(tapered, 2, "+Z", 25)[0]
+        back_impression = build_open_face(tapered, 2, "-Z", 25)[0]
+        assert front_impression.bounding_box()[3] > back_impression.bounding_box()[3]
         info = sphere.stat()
         meshes, note = geometry_job((sphere, info.st_size, info.st_mtime_ns), "preview",
                                     settings=(2, "+Z", 85), open_face=True)
-        assert len(meshes) == 1 and "overhangs" in note
+        assert len(meshes) == 1 and "Overhangs" in note
         try:
             build_open_face(round_model, 2, "+Z", 100)
         except ValueError as error:
-            assert "no flat footprint" in str(error)
+            assert "no open face" in str(error)
         else:
-            raise AssertionError("A round tip needs a trimmed footprint for the backing.")
+            raise AssertionError("A closed round tip should not be exported as an impression.")
 
         torus = path / "dense-torus.stl"
         trimesh.creation.torus(20, 7, major_sections=96, minor_sections=64).export(torus)
