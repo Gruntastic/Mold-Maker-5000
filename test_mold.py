@@ -7,7 +7,7 @@ import trimesh
 from manifold3d import Manifold
 
 from mold_maker import (OPEN_DIRECTIONS, build_mold, build_mold_parts, build_open_face, exploded_scene, export_mold,
-                        face_up_scene, geometry_job, load_model, mold_exterior, save_halves, stl_bytes)
+                        face_up_scene, geometry_job, load_model, save_halves, stl_bytes)
 from mesh_tools import check_mesh, read_mesh, repair_mesh
 from preview import preview_mesh
 
@@ -114,13 +114,13 @@ def check_export():
 
         info = box_path.stat()
         source_key = box_path, info.st_size, info.st_mtime_ns
-        settings = (5, "-Z", 35, 0, None, None, None, ())
+        settings = (5, "-Y", 35, 0, None, None, None, ())
         front, back = build_mold(model, *settings)[0]
-        assert np.isclose(front.bounding_box()[5], 6) and np.isclose(back.bounding_box()[2], 6)
-        outer, _ = mold_exterior(model, 5)
-        assert np.isclose(front.volume() + back.volume(), outer.volume() - model.volume())
+        np.testing.assert_allclose(front.bounding_box(), [-15, -20, -25, 15, 4.5, 25])
+        np.testing.assert_allclose(back.bounding_box(), [-15, 4.5, -25, 15, 20, 25])
+        assert np.isclose(front.volume() + back.volume(), 30 * 40 * 50 - model.volume())
         meshes, _ = geometry_job(source_key, "preview", settings=settings)
-        left, right = face_up_scene(meshes, "-Z", 5)
+        left, right = face_up_scene(meshes, "-Y", 5)
         assert left[0][0][:, 0].max() + left[1][0] < right[0][0][:, 0].min() + right[1][0]
         assert all(np.isclose(mesh[0][:, 2].max() + offset[2], 0) for mesh, offset, _ in (left, right))
         result = geometry_job(source_key, "export", settings=settings, destination=path)
@@ -129,12 +129,12 @@ def check_export():
 
         source_preview = geometry_job(source_key, "check")[1]
         for liner_thickness in (None, 3):
-            settings = (5, "-Z", 35, 0, liner_thickness, 0.25, None, ())
+            settings = (5, "-Y", 35, 0, liner_thickness, 0.25, None, ())
             meshes, _ = geometry_job(source_key, "preview", settings=settings)
-            front_view, center, back_view = exploded_scene(meshes, source_preview, "-Z", 5)
+            front_view, center, back_view = exploded_scene(meshes, source_preview, "-Y", 5)
             assert center[0] is source_preview
-            assert front_view[0][0][:, 2].max() + front_view[1][2] < source_preview[0][:, 2].min()
-            assert back_view[0][0][:, 2].min() + back_view[1][2] > source_preview[0][:, 2].max()
+            assert front_view[0][0][:, 1].max() + front_view[1][1] < source_preview[0][:, 1].min()
+            assert back_view[0][0][:, 1].min() + back_view[1][1] > source_preview[0][:, 1].max()
         front, back = build_mold(model, *settings)[0]
         shell = front + back
         inside_gap = Manifold.cube((1, 1, 1)).translate((11, 0, 0))
@@ -144,6 +144,13 @@ def check_export():
         result = geometry_job(source_key, "export", settings=settings, destination=path)
         assert {file.name for file in result.iterdir()} == {"brace_front.stl", "brace_back.stl"}
         assert all(trimesh.load_mesh(file).is_volume for file in result.glob("*.stl"))
+
+        original = box_path.read_bytes()
+        positive_path = geometry_job(source_key, "save_positive", destination=path / "box_positive.stl")
+        positive = trimesh.load_mesh(positive_path)
+        assert positive.is_volume and np.isclose(positive.volume, model.volume())
+        np.testing.assert_allclose(positive.bounds.ravel(), model.bounding_box())
+        assert box_path.read_bytes() == original
 
         settings = (3, "+Z", 100)
         impression, note = build_open_face(model, *settings)
@@ -180,11 +187,13 @@ def check_export():
         torus = path / "dense-torus.stl"
         trimesh.creation.torus(20, 7, major_sections=96, minor_sections=64).export(torus)
         model = load_model(torus)
-        for wall, expected in ((5, "simplified"), (1, "sections")):
-            halves, note = build_mold(model, wall, "X", 50, 0)
-            assert expected in note
-            outer, _ = mold_exterior(model, wall)
-            assert np.isclose(sum(half.volume() for half in halves), outer.volume() - model.volume())
+        lower, upper = np.array(model.bounding_box()).reshape(2, 3)
+        for wall in (5, 1):
+            halves, _ = build_mold(model, wall, "X", 50, 0)
+            outer_volume = np.prod(upper - lower + 2 * wall)
+            assert np.isclose(sum(half.volume() for half in halves), outer_volume - model.volume())
+            corner = Manifold.cube((wall / 2,) * 3).translate(tuple(upper))
+            assert np.isclose((halves[0] ^ corner).volume(), corner.volume())
             result = save_halves(halves, torus, path, "X")
             assert all(trimesh.load_mesh(file).is_volume for file in result.glob("*.stl"))
 

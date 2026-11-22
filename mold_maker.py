@@ -25,10 +25,11 @@ OPEN_DIRECTIONS = {
     "+Z": (0, 0, 0), "-Z": (180, 0, 0),
 }
 MOLD_TABS = ("Direct Cast", "Open-Face")
+VERTICAL_SPLITS = ("+X", "-X", "+Y", "-Y")
 OPEN_VIEW = "Brush-on impression"
 PAIR_VIEW = "Front and back"
 EXPLODED_VIEW = "Exploded mold"
-VIEWS = ("Source model", EXPLODED_VIEW, "Assembled mold", "Front half", "Back half", PAIR_VIEW)
+VIEWS = ("Positive model", EXPLODED_VIEW, "Assembled mold", "Front half", "Back half", PAIR_VIEW)
 HALF_VIEWS = ("Front half", "Back half")
 MODEL_COLOR = (132, 193, 232)
 HALF_COLORS = ((105, 208, 187), (239, 176, 114))
@@ -285,7 +286,8 @@ def build_mold_parts(model, wall, axis, split_percent, diameter, liner_thickness
             raise ValueError("Enter a positive silicone liner thickness.")
         cavity, liner_note = mold_exterior(model, liner_thickness, thin_gap=True)
         liner = (cavity - model).split_by_plane(normal, split_at)
-    outer, exterior_note = mold_exterior(cavity, wall)
+    lower_corner, upper_corner = np.asarray(cavity.bounding_box()).reshape(2, 3)
+    outer = Manifold.cube(tuple(upper_corner - lower_corner + 2 * wall)).translate(tuple(lower_corner - wall))
     shell = outer - cavity
     top = outer.bounding_box()[5]
     channels = []
@@ -310,7 +312,7 @@ def build_mold_parts(model, wall, axis, split_percent, diameter, liner_thickness
         if half.status() != Error.NoError or half.volume() <= 0 or len(half.decompose()) != 1:
             raise ValueError("The settings did not produce two solid mold halves. Try a thicker wall or a different split.")
     pour_note = "Add a pour hole and vents before pouring around the master." if liner_thickness is not None and diameter == 0 else ""
-    note = "\n".join(filter(None, (liner_note, exterior_note, pour_note)))
+    note = "\n".join(filter(None, (liner_note, pour_note)))
     if front_is_negative:
         halves = halves[::-1]
         if liner is not None:
@@ -439,12 +441,13 @@ def geometry_job(source_key, action, repaired=False, settings=None, destination=
         return report, display
     if not report.ready:
         raise ValueError("Repair the mesh before exporting or preparing a mold.")
-    if action == "save_repair":
+    if action in ("save_repair", "save_positive"):
         if destination.resolve() == source_path.resolve() or (destination.exists() and destination.samefile(source_path)):
-            raise ValueError("Choose a new filename for the repaired copy.")
-        with tempfile.TemporaryDirectory(prefix=".repair-", dir=destination.parent) as directory:
-            staged = Path(directory) / "repaired.stl"
-            staged.write_bytes(repaired_stl(mesh))
+            raise ValueError("Choose a new filename for the STL copy.")
+        data = stl_bytes(model) if action == "save_positive" else repaired_stl(mesh)
+        with tempfile.TemporaryDirectory(prefix=".mesh-", dir=destination.parent) as directory:
+            staged = Path(directory) / "model.stl"
+            staged.write_bytes(data)
             staged.replace(destination)
         return destination
 
@@ -594,6 +597,8 @@ def launch():
     ttk.Label(viewer, text="Drag to rotate  ·  Right-drag to pan  ·  Scroll to zoom", style="Muted.TLabel").grid(
         row=2, column=0, columnspan=3, sticky="w",
     )
+    positive_save = ttk.Button(viewer, text="Save positive STL…", command=lambda: save_positive())
+    positive_save.grid(row=3, column=0, columnspan=3, sticky="e", pady=(5, 0))
 
     source = tk.StringVar()
     status = tk.StringVar(value="Choose an STL, OBJ, or 3MF model.")
@@ -713,6 +718,8 @@ def launch():
         repair_button.state(["!disabled"] if can_repair else ["disabled"])
         can_save_repair = job is None and repaired and report is not None and report.ready
         repair_save.state(["!disabled"] if can_save_repair else ["disabled"])
+        can_save_positive = job is None and report is not None and report.ready
+        positive_save.state(["!disabled"] if can_save_positive else ["disabled"])
 
         if job is not None:
             status.set(job)
@@ -813,6 +820,8 @@ def launch():
                     results[tab_index] = settings, *result
                 elif action == "export":
                     notice = f"Saved brush-on mold STL in {result}" if open_face else f"Saved two STL files in {result}"
+                elif action == "save_positive":
+                    notice = f"Saved positive STL to {result}"
                 else:
                     notice = f"Saved repaired STL to {result}"
             refresh()
@@ -913,6 +922,15 @@ def launch():
         if filename:
             submit("save_repair", "Saving the repaired STL…", destination=Path(filename))
 
+    def save_positive():
+        filename = filedialog.asksaveasfilename(
+            parent=root, title="Save positive model as STL", defaultextension=".stl",
+            filetypes=[("STL mesh", "*.stl")], initialdir=str(source_key[0].parent),
+            initialfile=f"{source_key[0].stem}_positive.stl",
+        )
+        if filename:
+            submit("save_positive", "Saving the positive STL…", destination=Path(filename))
+
     ttk.Label(panel, text="Casting Mold Maker", style="Title.TLabel").grid(
         row=0, column=0, columnspan=3, sticky="w", pady=(0, 17),
     )
@@ -949,7 +967,7 @@ def launch():
             save_buttons.append(button)
             continue
         wall = tk.StringVar(value="5")
-        axis = tk.StringVar(value="+Z")
+        axis = tk.StringVar(value="+Y")
         split = tk.StringVar(value="50")
         diameter = tk.StringVar(value="0")
         keys = tk.BooleanVar(value=False)
@@ -962,7 +980,7 @@ def launch():
         for row, (label, variable) in enumerate(controls):
             ttk.Label(page, text=label).grid(row=row, column=0, sticky="w", padx=(0, 12), pady=4)
             if variable is axis:
-                field = ttk.Combobox(page, textvariable=variable, values=tuple(OPEN_DIRECTIONS), width=6, state="readonly")
+                field = ttk.Combobox(page, textvariable=variable, values=VERTICAL_SPLITS, width=6, state="readonly")
             else:
                 field = ttk.Entry(page, textvariable=variable, width=10)
             field.grid(row=row, column=1, sticky="w")
@@ -995,7 +1013,7 @@ def launch():
             settings_changed()
 
         around_master.trace_add("write", toggle_master)
-        ttk.Label(page, text="Choose the model’s front direction. Enter 0 for no pour hole.",
+        ttk.Label(page, text="The box opens at a vertical seam. Enter 0 for no pour hole.",
                   wraplength=text_width, style="Muted.TLabel").grid(
             row=row + 4, column=0, columnspan=2, sticky="w", pady=(8, 12),
         )
