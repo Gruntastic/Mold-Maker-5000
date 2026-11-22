@@ -4,20 +4,20 @@ Turn a watertight STL, OBJ, or 3MF model into a negative mold. **Direct Cast** c
 
 ## Run on Windows
 
-Double-click **Casting Mold Maker 13.exe** in the `dist` folder or run **Open Mold Maker.cmd**. The bundled app runs on 64-bit Windows and includes Python and its dependencies. It draws at the Windows system DPI. Moving the window to a monitor with a different scaling factor can cause Windows to stretch it.
+Double-click **Casting Mold Maker 14.exe** in the `dist` folder or run **Open Mold Maker.cmd**. The bundled app runs on 64-bit Windows and includes Python and its dependencies. It draws at the Windows system DPI. Moving the window to a monitor with a different scaling factor can cause Windows to stretch it.
 
 ## Make a mold
 
 1. Open **Direct Cast** to make a two-piece mold for casting resin or silicone, and choose a source model. The app checks the mesh and builds a preview automatically. STL and OBJ coordinates are read as millimeters. 3MF dimensions are converted from the file’s declared units.
 2. Set the wall thickness. The default is 5 mm of padding from the cavity’s bounding box to each outside face.
 3. Choose **Front direction** along X or Y. The box always splits along a vertical plane, with both halves extending through its full height. Set **Split position (%)** to move the seam from the back toward the front. At 50% the split is centered.
-4. Add a pour hole if needed. The default diameter is 0 mm. With a positive diameter, the app looks for a horizontal section that can fit the opening and cuts the channel upward along +Z. Use a smaller diameter if the opening does not fit.
+4. Leave the pour hole on **Auto** to size a top opening that reaches the cavity. Enter a diameter in millimeters to set the size yourself, or enter 0 to omit the inlet.
 5. Open **Ports…** to enter a pour center as `X, Y` or add vents as `X, Y, diameter`, one vent per line. X and Y are measured in millimeters from the model’s bounding-box center. The channels run along +Z from the cavity to the exterior. Leave the pour center blank for automatic placement, or set the pour diameter to 0 to omit the inlet while keeping any vents.
 6. Enable **Add alignment keys** for two pins and matching sockets. **Key clearance (mm)** applies radially and at the socket floor. The default is 0.25 mm. If the app cannot fit two keys, try a thicker wall, move the split, or reduce the clearance. Dry-fit the printed halves before casting.
-7. **Exploded mold** shows the two negative halves pulled apart with the positive model in the center. **Front and back** lays both cavity faces up for inspection. **Assembled mold** shows the closed box. Drag to rotate, right-drag to pan, and scroll to zoom. The app may simplify previews with more than one million faces.
+7. **Exploded mold** shows the two negative halves pulled apart with the positive model in the center. **Front and back** lays both cavity faces up with the same end at the top. **Fit in back half** shows the positive in its exact seated position. **Assembled mold** shows the closed box. Drag to rotate, right-drag to pan, and scroll to zoom.
 8. Click **Save mold STLs…** to export two separate files, `mold_front.stl` and `mold_back.stl`.
 
-The app accepts a single closed, connected solid. A rigid mold can trap castings with undercuts. Choose a parting plane that lets both halves pull away, or use a flexible mold for shapes that lock into a rigid one. Use clamps to hold the halves closed during casting. Place vents at high points where air could collect.
+The app accepts a single closed, connected solid. An **Undercuts** warning means the shape can obstruct a straight pull from the chosen split, even when the model fits in its seated position. Try a different split for a rigid mold, or use a flexible mold for shapes that lock in. Use clamps to hold the halves closed during casting and place vents at high points where air could collect.
 
 Use **Positive model** to view the part by itself and **Save positive STL…** to save a separate printable copy from any tab. It retains the source scale and orientation and is centered to match the Direct Cast assembly. The source file stays intact.
 
@@ -32,6 +32,7 @@ A successful repair is used by all mold tabs. **Save repaired STL…** writes a 
 1. In **Direct Cast**, load the model you already printed and select **Cast silicone around a printed master**. Set **Silicone gap (mm)** to leave room for the silicone around it. The gap can be thicker around corners and where narrow recesses close up.
 2. Add a pour hole and vents. The inlet leads into the gap beside the master. **Save mold STLs…** exports the two vertically split box pieces as `brace_front.stl` and `brace_back.stl`.
 3. Dry-fit the master and hold it in the center of the gap with a removable fixture. Clamp and seal the brace halves, then pour silicone into the gap. Once it cures, separate the brace halves and open or slit the flexible liner as needed to release the master.
+4. If the rigid braces would catch on the master, use **Save liner STLs…** to get two negative inserts for separate fabrication in a flexible material. They seat inside the matching braces. Plan the casting inlet through the inserts before casting.
 
 ## Brush material into an open impression
 
@@ -47,5 +48,5 @@ From the project folder on 64-bit Windows with Python 3.14 installed, run:
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt pyinstaller==6.22.3
 .\.venv\Scripts\python.exe test_mold.py
-.\.venv\Scripts\python.exe -m PyInstaller --noconfirm --onefile --windowed --name "Casting Mold Maker 13" --manifest (Resolve-Path windows.manifest).Path --specpath build --collect-data trimesh mold_maker.py
+.\.venv\Scripts\python.exe -m PyInstaller --noconfirm --onefile --windowed --name "Casting Mold Maker 14" --manifest (Resolve-Path windows.manifest).Path --specpath build --collect-data trimesh mold_maker.py
 ```

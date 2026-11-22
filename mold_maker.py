@@ -29,7 +29,8 @@ VERTICAL_SPLITS = ("+X", "-X", "+Y", "-Y")
 OPEN_VIEW = "Brush-on impression"
 PAIR_VIEW = "Front and back"
 EXPLODED_VIEW = "Exploded mold"
-VIEWS = ("Positive model", EXPLODED_VIEW, "Assembled mold", "Front half", "Back half", PAIR_VIEW)
+FIT_VIEW = "Fit in back half"
+VIEWS = ("Positive model", EXPLODED_VIEW, "Assembled mold", "Front half", "Back half", PAIR_VIEW, FIT_VIEW)
 HALF_VIEWS = ("Front half", "Back half")
 MODEL_COLOR = (132, 193, 232)
 HALF_COLORS = ((105, 208, 187), (239, 176, 114))
@@ -43,14 +44,17 @@ def opposite_direction(direction):
     return ("-" if direction[0] == "+" else "+") + direction[1]
 
 
-def face_up_scene(halves, direction, wall, side=None):
+def face_up_scene(halves, direction, wall, side=None, source=None):
     scene = []
     for index, facing in enumerate((opposite_direction(direction), direction)):
         if side is not None and index != side:
             continue
         vertices, faces, normals = halves[index]
-        euler = np.deg2rad(OPEN_DIRECTIONS[facing])
-        rotation = trimesh.transformations.euler_matrix(*euler)[:3, :3].round().astype(np.float32)
+        axis = AXES.index(facing[1])
+        face = np.zeros(3, dtype=np.float32)
+        face[axis] = 1 if facing[0] == "+" else -1
+        up = np.array((0, 1, 0) if axis == 2 else (0, 0, 1), dtype=np.float32)
+        rotation = np.array((np.cross(up, face), up, face))
         vertices = vertices @ rotation.T
         lower, upper = vertices.min(axis=0), vertices.max(axis=0)
         offset = -(lower + upper) / 2
@@ -59,6 +63,9 @@ def face_up_scene(halves, direction, wall, side=None):
             offset[0] = -upper[0] - wall / 2 if index == 0 else -lower[0] + wall / 2
         offset[2] = -upper[2]
         scene.append(((vertices, faces, normals @ rotation.T), offset, HALF_COLORS[index]))
+        if source is not None:
+            points, triangles, directions = source
+            scene.append(((points @ rotation.T, triangles, directions @ rotation.T), offset, MODEL_COLOR))
     return tuple(scene)
 
 
@@ -255,11 +262,26 @@ def add_alignment_keys(shell, halves, axis, split_at, wall, clearance):
     return positive, negative
 
 
+def release_note(cavity, axis, split_at):
+    mesh = cavity.to_mesh64()
+    triangles = mesh.vert_properties[mesh.tri_verts, :3]
+    normals = np.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0])
+    component = normals[:, axis]
+    angular_tolerance = np.linalg.norm(normals, axis=1) * 1e-5
+    position_tolerance = cavity.get_tolerance()
+    on_front = triangles[:, :, axis].max(axis=1) > split_at + position_tolerance
+    on_back = triangles[:, :, axis].min(axis=1) < split_at - position_tolerance
+    if np.any(on_front & (component < -angular_tolerance)) or np.any(on_back & (component > angular_tolerance)):
+        return "Undercuts can lock rigid halves. Change the split or use a flexible mold for this shape."
+    return ""
+
+
 def build_mold_parts(model, wall, axis, split_percent, diameter, liner_thickness=None, key_clearance=None,
                      pour_center=None, vents=()):
-    if not np.isfinite([wall, split_percent, diameter]).all():
+    numbers = (wall, split_percent) if diameter is None else (wall, split_percent, diameter)
+    if not np.isfinite(numbers).all():
         raise ValueError("Enter finite numbers for the mold settings.")
-    if wall <= 0 or diameter < 0 or not 0 < split_percent < 100:
+    if wall <= 0 or (diameter is not None and diameter < 0) or not 0 < split_percent < 100:
         raise ValueError("Enter a positive wall thickness, a split between 0 and 100%, and a pour diameter of 0 or more.")
     if key_clearance is not None and (not np.isfinite(key_clearance) or key_clearance <= 0):
         raise ValueError("Enter a positive alignment key clearance.")
@@ -292,12 +314,27 @@ def build_mold_parts(model, wall, axis, split_percent, diameter, liner_thickness
     top = outer.bounding_box()[5]
     channels = []
     master = model if liner_thickness is not None else None
-    if diameter > 0:
-        if pour_center is None:
-            above = bounds[5] if master is not None else None
-            channels.append(make_sprue(cavity, top, diameter, above=above))
-        else:
-            channels.append(make_positioned_port(cavity, top, pour_center, diameter, "The pour hole", master))
+    port_note = ""
+    if diameter != 0:
+        sizes = (diameter,)
+        if diameter is None:
+            largest = min(6, float((upper_corner - lower_corner).min()) / 3)
+            sizes = largest, largest / 2, largest / 4
+        for size in sizes:
+            try:
+                if pour_center is None:
+                    above = bounds[5] if master is not None else None
+                    inlet = make_sprue(cavity, top, size, above=above)
+                else:
+                    inlet = make_positioned_port(cavity, top, pour_center, size, "The pour hole", master)
+            except ValueError:
+                if size == sizes[-1]:
+                    raise
+            else:
+                channels.append(inlet)
+                break
+        if diameter is None:
+            port_note = f"Automatic pour hole: {size:.3g} mm."
     for number, (x, y, vent_diameter) in enumerate(vents, 1):
         vent = make_positioned_port(cavity, top, (x, y), vent_diameter, f"Vent {number}", master)
         if any(not (vent ^ channel).is_empty() for channel in channels):
@@ -311,8 +348,9 @@ def build_mold_parts(model, wall, axis, split_percent, diameter, liner_thickness
     for half in halves:
         if half.status() != Error.NoError or half.volume() <= 0 or len(half.decompose()) != 1:
             raise ValueError("The settings did not produce two solid mold halves. Try a thicker wall or a different split.")
-    pour_note = "Add a pour hole and vents before pouring around the master." if liner_thickness is not None and diameter == 0 else ""
-    note = "\n".join(filter(None, (liner_note, pour_note)))
+    if diameter == 0:
+        port_note = "Add a pour hole before casting with the halves closed."
+    note = "\n".join(filter(None, (liner_note, port_note, release_note(cavity, axis_index, split_at))))
     if front_is_negative:
         halves = halves[::-1]
         if liner is not None:
@@ -457,12 +495,17 @@ def geometry_job(source_key, action, repaired=False, settings=None, destination=
     if cached is None or cached[0] != settings:
         if open_face:
             mold, note = build_open_face(model, *settings)
-            parts = (mold,)
+            parts, liners = (mold,), None
         else:
-            parts, note, _ = build_mold_parts(model, *settings)
-        cached = settings, parts, note
+            parts, note, liners = build_mold_parts(model, *settings)
+        cached = settings, parts, note, liners
         worker_molds[mode] = cached
-    _, parts, note = cached
+    _, parts, note, liners = cached
+    if action == "export_liners":
+        if liners is None:
+            raise ValueError("Enable casting around a printed master to save the liner halves.")
+        files = zip(("liner_front.stl", "liner_back.stl"), liners)
+        return save_stls(destination, f"{source_path.stem}_flexible_liners", files)
     if action == "export":
         if open_face:
             return save_stls(destination, f"{source_path.stem}_brush_on_mold", (("brush_on_mold.stl", parts[0]),))
@@ -643,18 +686,20 @@ def launch():
             validate_open_face(*settings)
             return settings
         wall, axis, split, diameter, keys, clearance, around_master, silicone_gap = fields[index]
-        numeric = float(wall.get()), float(split.get()), float(diameter.get())
+        wall_mm, split_percent = float(wall.get()), float(split.get())
+        pour = diameter.get().strip()
+        diameter_mm = None if pour.lower() == "auto" else float(pour)
         key_gap = float(clearance.get()) if keys.get() else None
         liner = float(silicone_gap.get()) if around_master.get() else None
-        if not np.isfinite(numeric).all():
+        if not np.isfinite((wall_mm, split_percent)).all() or (diameter_mm is not None and not np.isfinite(diameter_mm)):
             raise ValueError("Enter finite numbers for the mold settings.")
-        if numeric[0] <= 0 or not 0 < numeric[1] < 100 or numeric[2] < 0:
-            raise ValueError("Use a positive wall thickness, a split between 0 and 100%, and a pour diameter of 0 or more.")
+        if wall_mm <= 0 or not 0 < split_percent < 100 or (diameter_mm is not None and diameter_mm < 0):
+            raise ValueError("Use a positive wall thickness, a split between 0 and 100%, and Auto or a pour diameter of 0 or more.")
         if key_gap is not None and (not np.isfinite(key_gap) or key_gap <= 0):
             raise ValueError("Enter a positive alignment key clearance.")
         if liner is not None and (not np.isfinite(liner) or liner <= 0):
             raise ValueError("Enter a positive silicone gap around the master.")
-        return numeric[0], axis.get(), numeric[1], numeric[2], liner, key_gap, *ports
+        return wall_mm, axis.get(), split_percent, diameter_mm, liner, key_gap, *ports
 
     def current_settings(index):
         try:
@@ -669,7 +714,7 @@ def launch():
         elif mode == EXPLODED_VIEW:
             axis = fields[0][1].get()[1]
             preview.reset(yaw={"X": 22, "Y": 68, "Z": 32}[axis], pitch=26)
-        elif mode == PAIR_VIEW or mode in HALF_VIEWS:
+        elif mode in (PAIR_VIEW, FIT_VIEW) or mode in HALF_VIEWS:
             preview.reset(yaw=0, pitch=65)
         else:
             preview.reset()
@@ -702,6 +747,8 @@ def launch():
                 scene = ((meshes[0], origin, HALF_COLORS[0]),)
             elif mode == EXPLODED_VIEW:
                 scene = exploded_scene(meshes, source_preview, settings[1], settings[0])
+            elif mode == FIT_VIEW:
+                scene = face_up_scene(meshes, settings[1], settings[0], side=1, source=source_preview)
             elif mode == PAIR_VIEW or mode in HALF_VIEWS:
                 half = HALF_VIEWS.index(mode) if mode in HALF_VIEWS else None
                 scene = face_up_scene(meshes, settings[1], settings[0], side=half)
@@ -714,6 +761,9 @@ def launch():
             record = results.get(tab_index)
             can_save = job is None and record is not None and record[0] == tab_settings and record[1] is not None
             button.state(["!disabled"] if can_save else ["disabled"])
+            if tab_index == 0:
+                can_save_liners = can_save and tab_settings[4] is not None
+                liner_save.state(["!disabled"] if can_save_liners else ["disabled"])
         can_repair = job is None and report is not None and bool(report.issues) and not repaired
         repair_button.state(["!disabled"] if can_repair else ["disabled"])
         can_save_repair = job is None and repaired and report is not None and report.ready
@@ -822,6 +872,8 @@ def launch():
                     notice = f"Saved brush-on mold STL in {result}" if open_face else f"Saved two STL files in {result}"
                 elif action == "save_positive":
                     notice = f"Saved positive STL to {result}"
+                elif action == "export_liners":
+                    notice = f"Saved two liner STLs in {result}"
                 else:
                     notice = f"Saved repaired STL to {result}"
             refresh()
@@ -901,16 +953,20 @@ def launch():
         selected_views[notebook.index("current")] = view.get()
         render()
 
-    def save_mold(index):
+    def save_mold(index, *, liners=False):
         nonlocal last_folder
-        label = "brush-on mold STL" if MOLD_TABS[index] == "Open-Face" else "mold STLs"
+        if liners:
+            label = "flexible liner STLs"
+        else:
+            label = "brush-on mold STL" if MOLD_TABS[index] == "Open-Face" else "mold STLs"
         selected = filedialog.askdirectory(
             parent=root, title=f"Choose where to save the {label}",
             initialdir=last_folder or str(source_key[0].parent), mustexist=True,
         )
         if selected:
             last_folder = selected
-            submit("export", f"Saving {label}…", settings=settings_for(index), destination=Path(selected),
+            action = "export_liners" if liners else "export"
+            submit(action, f"Saving {label}…", settings=settings_for(index), destination=Path(selected),
                    tab_index=index)
 
     def save_repair():
@@ -969,14 +1025,14 @@ def launch():
         wall = tk.StringVar(value="5")
         axis = tk.StringVar(value="+Y")
         split = tk.StringVar(value="50")
-        diameter = tk.StringVar(value="0")
+        diameter = tk.StringVar(value="Auto")
         keys = tk.BooleanVar(value=False)
         clearance = tk.StringVar(value="0.25")
         around_master = tk.BooleanVar(value=False)
         silicone_gap = tk.StringVar(value="3")
         fields.append((wall, axis, split, diameter, keys, clearance, around_master, silicone_gap))
         controls = [("Wall thickness (mm)", wall), ("Front direction", axis), ("Split position (%)", split),
-                    ("Pour hole diameter (mm)", diameter)]
+                    ("Pour hole (mm or Auto)", diameter)]
         for row, (label, variable) in enumerate(controls):
             ttk.Label(page, text=label).grid(row=row, column=0, sticky="w", padx=(0, 12), pady=4)
             if variable is axis:
@@ -1013,13 +1069,15 @@ def launch():
             settings_changed()
 
         around_master.trace_add("write", toggle_master)
-        ttk.Label(page, text="The box opens at a vertical seam. Enter 0 for no pour hole.",
+        ttk.Label(page, text="The box opens at a vertical seam. Auto fits a pour opening to the cavity.",
                   wraplength=text_width, style="Muted.TLabel").grid(
             row=row + 4, column=0, columnspan=2, sticky="w", pady=(8, 12),
         )
         button = ttk.Button(page, text="Save mold STLs…", style="Accent.TButton", command=lambda tab=index: save_mold(tab))
-        button.grid(row=row + 5, column=0, columnspan=2, sticky="w")
+        button.grid(row=row + 5, column=0, sticky="w")
         save_buttons.append(button)
+        liner_save = ttk.Button(page, text="Save liner STLs…", command=lambda tab=index: save_mold(tab, liners=True))
+        liner_save.grid(row=row + 5, column=1, sticky="w", padx=(8, 0))
 
     check_tab = ttk.Frame(notebook, padding=(12, 12))
     notebook.add(check_tab, text="Mesh Check")

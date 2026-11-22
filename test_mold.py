@@ -123,11 +123,20 @@ def check_export():
         left, right = face_up_scene(meshes, "-Y", 5)
         assert left[0][0][:, 0].max() + left[1][0] < right[0][0][:, 0].min() + right[1][0]
         assert all(np.isclose(mesh[0][:, 2].max() + offset[2], 0) for mesh, offset, _ in (left, right))
+        for original_half, face_up in zip(meshes, (left, right)):
+            np.testing.assert_array_equal(original_half[0][:, 2], face_up[0][0][:, 1])
         result = geometry_job(source_key, "export", settings=settings, destination=path)
         assert {file.name for file in result.iterdir()} == {"mold_front.stl", "mold_back.stl"}
         assert all(trimesh.load_mesh(file).is_volume for file in result.glob("*.stl"))
 
         source_preview = geometry_job(source_key, "check")[1]
+        seated = face_up_scene(meshes, "-Y", 5, side=1, source=source_preview)
+        np.testing.assert_array_equal(seated[0][1], seated[1][1])
+        auto, note = build_mold(model, 5, "+Y", 50, None)
+        assert "Automatic pour hole:" in note and "Undercuts" not in note
+        assert (auto[0] + auto[1]).slice(24).area() < 30 * 40
+        _, note = build_mold(round_model, 5, "+Y", 65, 0)
+        assert "Undercuts" in note
         for liner_thickness in (None, 3):
             settings = (5, "-Y", 35, 0, liner_thickness, 0.25, None, ())
             meshes, _ = geometry_job(source_key, "preview", settings=settings)
@@ -143,6 +152,9 @@ def check_export():
         assert np.isclose((shell ^ outside_gap).volume(), 1)
         result = geometry_job(source_key, "export", settings=settings, destination=path)
         assert {file.name for file in result.iterdir()} == {"brace_front.stl", "brace_back.stl"}
+        assert all(trimesh.load_mesh(file).is_volume for file in result.glob("*.stl"))
+        result = geometry_job(source_key, "export_liners", settings=settings, destination=path)
+        assert {file.name for file in result.iterdir()} == {"liner_front.stl", "liner_back.stl"}
         assert all(trimesh.load_mesh(file).is_volume for file in result.glob("*.stl"))
 
         original = box_path.read_bytes()
