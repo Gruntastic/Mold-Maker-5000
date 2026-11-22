@@ -15,7 +15,7 @@ import numpy as np
 import trimesh
 
 from preview import Preview, preview_mesh
-from parting import contoured_parting, split_contoured
+from parting import contour_margins, contoured_parting, split_contoured
 from mesh_tools import check_mesh, raw_preview, read_mesh, repair_mesh, repaired_stl
 
 
@@ -217,13 +217,17 @@ def add_alignment_keys(shell, halves, axis, split_at, wall, clearance, cutter=No
     to_model = {"X": (0, 90, 0), "Y": (-90, 0, 0), "Z": (0, 0, 0)}[axis]
     local_shell = shell.rotate(tuple(-angle for angle in to_model))
     local_cutter = cutter.rotate(tuple(-angle for angle in to_model)) if cutter is not None else None
-    radius = min(wall / 4, 3)
-    depth = min(wall * 0.6, 4)
+    press_fit = clearance < 0
+    radius = min(max(wall * 0.55, 1.1), 3) if press_fit else min(wall / 4, 3)
+    depth = min(wall * 0.9, 6) if press_fit else min(wall * 0.6, 4)
     margin = min(wall / 10, 0.5)
     socket_radius = radius + clearance
-    reserve_radius = socket_radius + margin
+    if socket_radius < radius * 0.75:
+        raise ValueError("The press fit is too tight for these keys. Use a value closer to zero.")
+    floor_clearance = max(0.15, clearance)
+    reserve_radius = max(radius, socket_radius) + margin
     left, front, _, right, back, _ = local_shell.bounding_box()
-    no_fit = "Two alignment keys do not fit. Increase the wall thickness, reduce the key clearance, or move the split."
+    no_fit = "Two alignment keys do not fit. Increase the wall thickness or move the split."
     if 2 * reserve_radius >= min(right - left, back - front):
         raise ValueError(no_fit)
     centers = local_shell.slice(split_at).offset(-reserve_radius * 1.01)
@@ -238,13 +242,17 @@ def add_alignment_keys(shell, halves, axis, split_at, wall, clearance, cutter=No
         # ponytail: bound the search on detailed contours. Use explicit key
         # positions if the automatic candidates miss a suitable patch.
         candidates = triangles[np.argsort(-areas, kind="stable")[:48]].mean(axis=1)
+    if local_cutter is not None:
+        inset = reserve_radius * 1.02
+        corners = list(product((left + inset, right - inset), (front + inset, back - inset)))
+        candidates = np.vstack((corners, candidates))
 
-    reserve = Manifold.cylinder(depth + clearance + 2 * margin, reserve_radius, circular_segments=48)
+    reserve = Manifold.cylinder(depth + floor_clearance + 2 * margin, reserve_radius, circular_segments=48)
     selected = []
     for _ in range(2):
         for x, y in candidates:
             # Check the full socket depth and the material supporting the pin.
-            probe = reserve.translate((x, y, split_at - depth - clearance - margin))
+            probe = reserve.translate((x, y, split_at - depth - floor_clearance - margin))
             outside = probe - local_shell
             if outside.status() != Error.NoError or not outside.is_empty():
                 continue
@@ -261,11 +269,20 @@ def add_alignment_keys(shell, halves, axis, split_at, wall, clearance, cutter=No
         candidates = candidates[order[distances[order] >= 2 * reserve_radius]]
 
     pin = Manifold.cylinder(depth + margin, radius, circular_segments=48)
-    socket = Manifold.cylinder(depth + clearance + margin, socket_radius, circular_segments=48)
+    if press_fit:
+        tip = socket_radius * 0.85
+        lead = min(depth / 3, 1)
+        profile = np.array([(0, 0), (tip, 0), (radius, lead), (radius, depth + margin), (0, depth + margin)])
+        pin = CrossSection([profile]).revolve(circular_segments=48)
+        slot = max(0.45, radius * 0.25)
+        slot_depth = depth * 0.75
+        split = Manifold.cube((slot, 2 * radius + 2, slot_depth + 1)).translate((-slot / 2, -radius - 1, -1))
+        pin = pin - split
+    socket = Manifold.cylinder(depth + floor_clearance + margin, socket_radius, circular_segments=48)
     positive, negative = halves
     for x, y in selected:
         positive = positive + pin.translate((x, y, split_at - depth)).rotate(to_model)
-        negative = negative - socket.translate((x, y, split_at - depth - clearance)).rotate(to_model)
+        negative = negative - socket.translate((x, y, split_at - depth - floor_clearance)).rotate(to_model)
     return positive, negative
 
 
@@ -290,8 +307,8 @@ def build_mold_parts(model, wall, axis, split_percent, diameter, liner_thickness
         raise ValueError("Enter finite numbers for the mold settings.")
     if wall <= 0 or (diameter is not None and diameter < 0) or not 0 < split_percent < 100:
         raise ValueError("Enter a positive wall thickness, a split between 0 and 100%, and a pour diameter of 0 or more.")
-    if key_clearance is not None and (not np.isfinite(key_clearance) or key_clearance <= 0):
-        raise ValueError("Enter a positive alignment key clearance.")
+    if key_clearance is not None and not np.isfinite(key_clearance):
+        raise ValueError("Enter a finite key fit adjustment.")
     if pour_center is not None and not np.isfinite(pour_center).all():
         raise ValueError("Enter finite coordinates for the pour hole.")
     if any(not np.isfinite(vent).all() or vent[2] <= 0 for vent in vents):
@@ -316,7 +333,11 @@ def build_mold_parts(model, wall, axis, split_percent, diameter, liner_thickness
         cavity, liner_note = mold_exterior(model, liner_thickness, thin_gap=True)
         liner_material = cavity - model
     lower_corner, upper_corner = np.asarray(cavity.bounding_box()).reshape(2, 3)
-    outer = Manifold.cube(tuple(upper_corner - lower_corner + 2 * wall)).translate(tuple(lower_corner - wall))
+    padding = np.full(3, wall)
+    if follow_contour:
+        padding[:] = sum(contour_margins(wall))
+        padding[axis_index] = wall
+    outer = Manifold.cube(tuple(upper_corner - lower_corner + 2 * padding)).translate(tuple(lower_corner - padding))
     shell = outer - cavity
     top = outer.bounding_box()[5]
     channels = []
@@ -712,8 +733,8 @@ def launch():
             raise ValueError("Enter finite numbers for the mold settings.")
         if wall_mm <= 0 or not 0 < split_percent < 100 or (diameter_mm is not None and diameter_mm < 0):
             raise ValueError("Use a positive wall thickness, a split between 0 and 100%, and Auto or a pour diameter of 0 or more.")
-        if key_gap is not None and (not np.isfinite(key_gap) or key_gap <= 0):
-            raise ValueError("Enter a positive alignment key clearance.")
+        if key_gap is not None and not np.isfinite(key_gap):
+            raise ValueError("Enter a finite key fit adjustment.")
         if liner is not None and (not np.isfinite(liner) or liner <= 0):
             raise ValueError("Enter a positive silicone gap around the master.")
         return wall_mm, axis.get(), split_percent, diameter_mm, liner, key_gap, *ports, follow_contour.get()
@@ -1044,7 +1065,7 @@ def launch():
         split = tk.StringVar(value="50")
         diameter = tk.StringVar(value="Auto")
         keys = tk.BooleanVar(value=False)
-        clearance = tk.StringVar(value="0.25")
+        clearance = tk.StringVar(value="-0.10")
         around_master = tk.BooleanVar(value=False)
         silicone_gap = tk.StringVar(value="3")
         follow_contour = tk.BooleanVar(value=True)
@@ -1069,7 +1090,7 @@ def launch():
             row=row, column=0, sticky="w", pady=4,
         )
         ttk.Button(page, text="Ports…", command=edit_ports).grid(row=row, column=1, sticky="w")
-        ttk.Label(page, text="Key clearance (mm)").grid(row=row + 1, column=0, sticky="w", padx=(0, 12), pady=4)
+        ttk.Label(page, text="Key fit (mm, − holds)").grid(row=row + 1, column=0, sticky="w", padx=(0, 12), pady=4)
         clearance_entry = ttk.Entry(page, textvariable=clearance, width=10, state="disabled")
         clearance_entry.grid(row=row + 1, column=1, sticky="w")
         clearance.trace_add("write", settings_changed)

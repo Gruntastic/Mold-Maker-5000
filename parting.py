@@ -8,12 +8,17 @@ from manifold3d import Manifold, Mesh64, OpType
 TO_LOCAL = {"X": (0, -90, 0), "Y": (90, 0, 0), "Z": (0, 0, 0)}
 
 
+def contour_margins(wall):
+    return max(3.5, 0.8 * wall), max(6, wall)
+
+
 def contoured_parting(cavity, axis, split_at, wall, guide=None):
     rotation = TO_LOCAL[axis]
     local_cavity = cavity.rotate(rotation)
     solid = local_cavity if guide is None else guide.rotate(rotation)
     lower, upper = np.asarray(local_cavity.bounding_box()).reshape(2, 3)
-    padding = wall + 1
+    transition, land = contour_margins(wall)
+    padding = transition + land + 1
     # ponytail: a regular, bounded ray grid keeps the operation practical on
     # dense imports. Adaptive sampling could track finer edges.
     counts = np.clip(np.ceil((upper[:2] - lower[:2] + 2 * padding) / 0.8).astype(int) + 1, 16, 256)
@@ -51,11 +56,19 @@ def contoured_parting(cavity, axis, split_at, wall, guide=None):
                 heights[row, col] = heights[j, i]
                 distance[row, col] = distance[j, i] + 1
                 queue.append((row, col))
+    # Smooth only the extension. The guide samples within the projected
+    # part keep the original mating surfaces on their intended sides.
+    outside = distance > 0
+    for _ in range(4):
+        grid = np.pad(heights, 1, mode="edge")
+        averaged = (grid[:-2, 1:-1] + grid[2:, 1:-1] + grid[1:-1, :-2] + grid[1:-1, 2:]) / 4
+        heights[outside] = averaged[outside]
     step = min(xs[1] - xs[0], ys[1] - ys[0])
-    blend = np.minimum(1, distance * step / wall)
+    t = np.minimum(1, distance * step / transition)
+    blend = t * t * (3 - 2 * t)
     heights += blend * (split_at - heights)
-    heights[[0, -1], :] = split_at
-    heights[:, [0, -1]] = split_at
+    heights[(ys <= lower[1] - transition) | (ys >= upper[1] + transition), :] = split_at
+    heights[:, (xs <= lower[0] - transition) | (xs >= upper[0] + transition)] = split_at
 
     x_grid, y_grid = np.meshgrid(xs, ys)
     bottom = np.column_stack((x_grid.ravel(), y_grid.ravel(), heights.ravel()))

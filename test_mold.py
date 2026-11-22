@@ -145,6 +145,18 @@ def check_export():
         assert np.isclose(front.ray_cast(*ray)[0].position[1], outer)
         assert np.isclose(back.ray_cast(*ray)[-1].position[1], inner)
         assert all(stl_bytes(half) for half in (front, back))
+        for x, z in ((19, 0), (-19, 1), (0, 19), (1, -19)):
+            flange_ray = (x, -10, z), (x, 20, z)
+            assert np.isclose(front.ray_cast(*flange_ray)[0].position[1], 6)
+            assert np.isclose(back.ray_cast(*flange_ray)[-1].position[1], 6)
+        pressed, _, _ = build_mold_parts(dome, 5, "+Y", 50, 0, key_clearance=-0.10, follow_contour=True)
+        pins = pressed[0] - front
+        sockets = back - pressed[1]
+        interference = pressed[0] ^ pressed[1]
+        assert len(pins.decompose()) == 2 and interference.volume() > 0
+        assert abs((interference - pins).volume()) < 1e-8
+        assert sockets.bounding_box()[1] < pins.bounding_box()[1]
+        assert all(stl_bytes(half) for half in pressed)
         for liner_thickness in (None, 3):
             settings = (5, "-Y", 35, 0, liner_thickness, 0.25, None, ())
             meshes, _ = geometry_job(source_key, "preview", settings=settings)
